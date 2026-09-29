@@ -445,6 +445,8 @@ bool checkRemovalTimeout()
                 TgxlConnection tgxl;
                 PgxlConnection pgxl;
                 AntennaGeniusModel ag;
+                AcomConnection acom;
+                PeripheralSettings::setDeviceString("Acom", "ManualIp", "192.0.2.100");
                 int connects = 0;
                 PeripheralConnectionTestAccess::injectConnect(tgxl, connects);
                 PeripheralConnectionTestAccess::injectConnect(pgxl, connects);
@@ -459,7 +461,7 @@ bool checkRemovalTimeout()
                     }
                 };
                 auto dialog = std::make_unique<RadioSetupDialog>(
-                    &model, nullptr, &tgxl, &pgxl, &ag);
+                    &model, nullptr, &tgxl, &pgxl, &ag, nullptr, &acom);
                 dialog->selectTab("Peripherals");
                 dialog->show();
                 QCoreApplication::processEvents();
@@ -469,6 +471,18 @@ bool checkRemovalTimeout()
                 if (!remove || !address || !notice) {
                     return false;
                 }
+                auto* acomField = dialog->findChild<QWidget*>("peripheralAddress_acom");
+                QLineEdit* acomAddress = nullptr;
+                for (QLineEdit* edit : acomField->findChildren<QLineEdit*>()) {
+                    if (edit->text() == "192.0.2.100") {
+                        acomAddress = edit;
+                    }
+                }
+                if (!acomAddress) {
+                    return false;
+                }
+                acomAddress->clear();
+                acomAddress->setModified(true);
                 address->clear();
                 address->setModified(true);
                 FakePeripheralAuthStore::deferClear(true);
@@ -487,7 +501,8 @@ bool checkRemovalTimeout()
                 }
                 reconnect();
                 if (connects != 0 || !dialog->close() || dialog->isVisible()
-                    || settings.value(ipKey).toString() != "192.0.2.90") {
+                    || settings.value(ipKey).toString() != "192.0.2.90"
+                    || !PeripheralSettings::deviceString("Acom", "ManualIp").isEmpty()) {
                     std::fprintf(stderr, "Removal timeout failed to bound close or retain state/lease\n");
                     return false;
                 }
@@ -545,6 +560,59 @@ bool checkSharedModelRemovalIsolation()
         if (!ag.isConnected() || ag.connectedDevice().name != target.name || connects != 1) {
             std::fprintf(stderr, "Remove disconnected the other shared-model device\n");
             return false;
+        }
+    }
+    return true;
+}
+
+bool checkSharedCredentialRemoval()
+{
+    for (bool removeAg : {false, true}) {
+        for (bool ownsCode : {false, true}) {
+            AppSettings& settings = AppSettings::instance();
+            settings.remove("Peripherals");
+            const QString id = removeAg ? "ag" : "shackswitch";
+            const QString ipKey = removeAg ? "AG_ManualIp" : "SS_ManualIp";
+            PeripheralSettings::setVisibleDeviceIds({id});
+            settings.setValue(ipKey, "192.0.2.110");
+            const QString endpoint = PeripheralAuthStore::endpoint(
+                ownsCode ? "192.0.2.110" : "192.0.2.111", 9007);
+            PeripheralAuthStore::save(PeripheralAuthStore::Device::AntennaGenius,
+                                      endpoint, "shared-code", qApp);
+            RadioModel radio;
+            AntennaGeniusModel ag;
+            int connects = 0;
+            PeripheralConnectionTestAccess::injectConnect(ag, connects);
+            RadioSetupDialog dialog(&radio, nullptr, nullptr, nullptr, &ag);
+            dialog.selectTab("Peripherals");
+            auto* remove = dialog.findChild<QPushButton*>("peripheralRemoveButton");
+            auto* list = dialog.findChild<QListWidget*>("peripheralDeviceList");
+            for (int row = 0; row < list->count(); ++row) {
+                if (list->item(row)->data(Qt::UserRole).toString() == id) {
+                    list->setCurrentRow(row);
+                }
+            }
+            FakePeripheralAuthStore::deferClear(true);
+            remove->click();
+            if (ownsCode) {
+                ag.connectToAddress("192.0.2.110", 9007);
+                if (connects || !PeripheralRemovalGuard::pending(PeripheralRemovalGuard::Device::AntennaGenius)) {
+                    return false;
+                }
+            }
+            FakePeripheralAuthStore::finishClear();
+            QCoreApplication::processEvents();
+            PeripheralAuthStore::LoadResult loaded;
+            PeripheralAuthStore::load(PeripheralAuthStore::Device::AntennaGenius,
+                endpoint, qApp, [&](const auto& result) { loaded = result; });
+            QCoreApplication::processEvents();
+            if ((!loaded.code.isEmpty()) == ownsCode || settings.contains(ipKey)
+                || PeripheralSettings::visibleDeviceIds().value_or(QStringList()).contains(id)) {
+                std::fprintf(stderr, "Shared credential ownership removal failed\n");
+                return false;
+            }
+            PeripheralAuthStore::clear(PeripheralAuthStore::Device::AntennaGenius, qApp, [](auto) {});
+            QCoreApplication::processEvents();
         }
     }
     return true;
@@ -1130,7 +1198,7 @@ int main(int argc, char** argv)
     }
     QApplication app(argc, argv);
     AppSettings::instance().load();
-    if (!checkRemovalTimeout() || !checkSharedModelRemovalIsolation()
+    if (!checkSharedCredentialRemoval() || !checkRemovalTimeout() || !checkSharedModelRemovalIsolation()
         || !checkPendingRemoval() || !checkRemovalOwnerTeardown()
         || !checkShackSwitchRetryDuringRemoval() || !checkOneShotShackSwitchDuringRemoval()) {
         std::fprintf(stderr, "Pending removal lifecycle regressed\n");
@@ -1619,6 +1687,7 @@ int main(int argc, char** argv)
         return 1;
     }
     removeButton->click();
+    QCoreApplication::processEvents();
     if (deviceList->count() != 3
         || PeripheralSettings::visibleDeviceIds().value_or(QStringList{}).contains(
             QStringLiteral("shackswitch"))) {

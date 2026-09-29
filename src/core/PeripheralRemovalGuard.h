@@ -5,7 +5,8 @@
 
 namespace AetherSDR {
 
-// Main-thread peripheral operation state, never persisted. The vault callback
+// Non-atomic counters: every acquire, release and query MUST run on the main
+// thread. Concurrent access is a data race. Never persisted. The vault callback
 // owns the guard so destroying Setup cannot permit a reconnect mid-delete.
 class PeripheralRemovalGuard {
 public:

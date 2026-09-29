@@ -10241,8 +10241,8 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
     columns->setSpacing(12);
 
     auto* listGroup = new QGroupBox(tr("Devices"), content);
-    listGroup->setFixedWidth(250);
-    listGroup->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Maximum);
+    listGroup->setMinimumWidth(250);
+    listGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     ThemeManager::instance().applyStyleSheet(listGroup,
         "QGroupBox { border: 1px solid {{color.background.2}}; border-radius: 4px; "
         "margin-top: 8px; padding-top: 12px; color: {{color.text.secondary}}; "
@@ -10263,7 +10263,8 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
         "QListWidget::item:alternate { background: {{color.background.2}}; }"
         "QListWidget::item:selected, QListWidget::item:alternate:selected { background: {{color.accent}}; "
         "color: {{color.background.0}}; }");
-    deviceList->setFixedHeight(340);
+    deviceList->setMinimumHeight(200);
+    deviceList->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     listLayout->addWidget(deviceList);
 
     const QString actionStyle =
@@ -10321,7 +10322,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                "Disconnect before changing the connection address or port."));
     });
     listLayout->addWidget(helpButton);
-    columns->addWidget(listGroup, 0, Qt::AlignTop);
+    columns->addWidget(listGroup, 1);
 
     auto* detailStack = new QStackedWidget(content);
     detailStack->setObjectName(QStringLiteral("peripheralDetailStack"));
@@ -10491,7 +10492,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             }
         }
     });
-    columns->addWidget(detailStack, 1);
+    columns->addWidget(detailStack, 2);
     vbox->insertWidget(0, content);
 
     auto activeIds = std::make_shared<QStringList>();
@@ -10660,7 +10661,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             break;
         case 4:
             if (AntennaGeniusModel::isShackSwitch(m_ag->connectedDevice())) {
-                m_ag->disconnectFromDevice();
+                m_ag->setAuthCode({});
             }
             break;
         case 5: m_acom->disconnect(); break;
@@ -10746,7 +10747,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             if (device.id != id) {
                 continue;
             }
-            if (device.row >= 1 && device.row <= 3) {
+            if (device.row >= 1 && device.row <= 4) {
                 const PeripheralAuthStore::Device authDevice = device.row == 1
                     ? PeripheralAuthStore::Device::Tgxl
                     : device.row == 2 ? PeripheralAuthStore::Device::Pgxl
@@ -10759,11 +10760,27 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                 // Keep this transient; only finishRemoval persists dismissal.
                 auto removal = std::make_shared<PeripheralRemovalGuard>(authDevice);
                 m_peripheralRemovalPending = true;
+                QString removalEndpoint;
+                const bool sharedTargetSelected = device.row >= 3
+                    && AntennaGeniusModel::isShackSwitch(m_ag->connectedDevice()) == (device.row == 4);
+                if (device.row >= 3) {
+                    const QString ipKey = device.row == 3 ? "AG_ManualIp" : "SS_ManualIp";
+                    const QString portKey = device.row == 3 ? "AG_ManualPort" : "SS_ControlPort";
+                    removalEndpoint = PeripheralAuthStore::endpoint(
+                        AppSettings::instance().value(ipKey).toString(),
+                        static_cast<quint16>(AppSettings::instance().value(portKey, 9007).toUInt()));
+                    if (sharedTargetSelected) {
+                        const QString peer = PeripheralAuthStore::endpoint(m_ag->peerAddress(), m_ag->peerPort());
+                        if (!peer.isEmpty()) {
+                            removalEndpoint = peer;
+                        }
+                    }
+                }
                 if (device.row == 1) {
                     m_tgxl->disconnect();
                 } else if (device.row == 2) {
                     m_pgxl->disconnect();
-                } else if (!AntennaGeniusModel::isShackSwitch(m_ag->connectedDevice())) {
+                } else if (sharedTargetSelected) {
                     m_ag->disconnectFromDevice();
                 }
                 const QString pendingMessage = tr("Removing %1. Wait for credential deletion before closing Setup.")
@@ -10782,11 +10799,14 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                 deadline->setSingleShot(true);
                 constexpr int kRemovalWaitMs = 15000;
                 connect(deadline, &QTimer::timeout, this,
-                        [this, timedOut, device, removalNotice, content]() {
+                        [this, timedOut, device, removalNotice, content, widgetAt]() {
                     *timedOut = true;
                     m_peripheralRemovalPending = false;
-                    // Close must not commit field edits from an abandoned Remove.
-                    m_peripheralRowSavers.clear();
+                    // Suppress only the abandoned row's clear-on-close edit.
+                    // Other rows may contain deliberate clears made before Remove.
+                    if (auto* address = qobject_cast<QLineEdit*>(widgetAt(device.row, 1))) {
+                        address->setModified(false);
+                    }
                     const QString message = tr(
                         "%1 removal timed out; stored-code deletion is unconfirmed. "
                         "Configuration was kept. You can close Setup. Reconnection remains "
@@ -10798,8 +10818,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                     content->setAccessibleDescription(message);
                 });
                 deadline->start(kRemovalWaitMs);
-                PeripheralAuthStore::clear(authDevice, qApp,
-                    [self = QPointer<RadioSetupDialog>(this), removal, device, finishRemoval,
+                const auto completed = [self = QPointer<RadioSetupDialog>(this), removal, device, finishRemoval,
                      timedOut, deadline = QPointer<QTimer>(deadline),
                      widgetAt, removalNotice, content](PeripheralAuthStore::ClearResult result) {
                     if (deadline) {
@@ -10812,7 +10831,8 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                     content->setEnabled(true);
                     content->setAccessibleDescription(QString());
                     removalNotice->hide();
-                    if (result != PeripheralAuthStore::ClearResult::Failed) {
+                    if (result == PeripheralAuthStore::ClearResult::Cleared
+                        || result == PeripheralAuthStore::ClearResult::SessionCleared) {
                         finishRemoval(device);
                         if (result == PeripheralAuthStore::ClearResult::SessionCleared) {
                             const QString message = RadioSetupDialog::tr(
@@ -10824,20 +10844,29 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                     } else if (QLabel* status = qobject_cast<QLabel*>(widgetAt(device.row, 7))) {
                         // Connection status may change independently after failure.
                         // Keep the failed operation visible until another Remove.
-                        const QString message = RadioSetupDialog::tr(
+                        const bool unknownOwner = result == PeripheralAuthStore::ClearResult::UnknownOwner;
+                        const QString message = unknownOwner ? RadioSetupDialog::tr(
+                            "%1 removal stopped: credential ownership is unknown. Connect this device "
+                            "to establish its peer address, then retry Remove. Configuration was kept.").arg(device.label)
+                            : RadioSetupDialog::tr(
                             "%1 removal failed: saved code remains in keychain. The connection was stopped; "
                             "normal reconnect events may connect it again. Retry Remove.").arg(device.label);
                         removalNotice->setText(message);
                         removalNotice->setAccessibleDescription(message);
                         removalNotice->show();
                         status->setProperty("credentialError", true);
-                        status->setText(RadioSetupDialog::tr(
+                        status->setText(unknownOwner ? message : RadioSetupDialog::tr(
                             "Error: saved code remains in keychain; retry Remove"));
                         ThemeManager::instance().applyStyleSheet(status,
                             "QLabel { color: {{color.accent.danger}}; font-size: 11px; }");
                     }
                     self->m_peripheralRemovalPending = false;
-                });
+                };
+                if (device.row >= 3) {
+                    PeripheralAuthStore::clearForEndpoint(authDevice, removalEndpoint, qApp, completed);
+                } else {
+                    PeripheralAuthStore::clear(authDevice, qApp, completed);
+                }
             } else {
                 finishRemoval(device);
             }

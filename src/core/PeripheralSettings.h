@@ -29,6 +29,10 @@ namespace AetherSDR {
 // than bundled with the ACOM feature that motivated adding these accessors.
 class PeripheralSettings {
 public:
+    // VisibleDevices uses stable lowercase UI identifiers, not the legacy
+    // connection-object names (Acom/SpeExpert/Vkamp/Lp100a). Keep these namespaces
+    // distinct: changing their spelling would require a settings migration.
+    // DiscoveryDismissed is currently used only for lowercase tgxl/pgxl.
     // nullopt means this installation predates the list UI: the dialog can
     // seed it from already configured manual targets without losing them.
     static std::optional<QStringList> visibleDeviceIds()

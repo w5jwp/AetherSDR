@@ -122,6 +122,19 @@ void PeripheralAuthStore::clear(Device device, QObject* context,
     });
 }
 
+void PeripheralAuthStore::clearForEndpoint(Device device, const QString& endpoint,
+                                           QObject* context,
+                                           std::function<void(ClearResult)> callback)
+{
+    const Entry& entry = entries.at(static_cast<std::size_t>(device));
+    if (!entry.code.isEmpty() && (endpoint.isEmpty() || entry.endpoint != endpoint)) {
+        const ClearResult result = endpoint.isEmpty() ? ClearResult::UnknownOwner : ClearResult::Cleared;
+        QTimer::singleShot(0, context, [callback, result]() { callback(result); });
+        return;
+    }
+    clear(device, context, std::move(callback));
+}
+
 std::optional<PeripheralAuthStore::CodeAvailability> PeripheralAuthStore::cachedStatus(
     Device device, const QString& endpoint)
 {

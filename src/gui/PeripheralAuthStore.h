@@ -32,11 +32,15 @@ public:
     static void save(Device device, const QString& endpoint, const QString& code,
                      QObject* context,
                      std::function<void(bool)> callback = {});
-    enum class ClearResult { Cleared, SessionCleared, Failed };
+    enum class ClearResult { Cleared, SessionCleared, Failed, UnknownOwner };
     // SessionCleared means the OS backend is unavailable: local state is
     // cleared, but deletion of a previously persisted secret is unconfirmed.
     static void clear(Device device, QObject* context,
                       std::function<void(ClearResult)> callback);
+    // Shared AG/ShackSwitch slot: delete only a matching peer endpoint. Unknown
+    // ownership fails closed; another endpoint's record is preserved.
+    static void clearForEndpoint(Device device, const QString& endpoint, QObject* context,
+                                 std::function<void(ClearResult)> callback);
     // Metadata only: never prompts the OS vault or exposes a saved secret.
     struct CodeAvailability {
         LoadStatus status;

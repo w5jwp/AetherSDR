@@ -226,5 +226,46 @@ int main(int argc, char** argv)
         [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
     drain();
     CHECK(loaded.code == QStringLiteral("retained-on-denial"));
+    QKeychain::TestControl::pendingDelete = nullptr; // Forget the completed fake job.
+    // Endpoint-scoped deletion cannot delete the other shared AG/SS record.
+    const auto shared = PeripheralAuthStore::Device::AntennaGenius;
+    PeripheralAuthStore::clearForEndpoint(shared, first, &app,
+        [&](ClearResult result) { clearResult = result; });
+    drain();
+    CHECK(clearResult == ClearResult::Cleared);
+    CHECK(QKeychain::TestControl::pendingDelete == nullptr);
+    PeripheralAuthStore::clearForEndpoint(shared, {}, &app,
+        [&](ClearResult result) { clearResult = result; });
+    drain();
+    CHECK(clearResult == ClearResult::UnknownOwner);
+    CHECK(QKeychain::TestControl::pendingDelete == nullptr);
+    PeripheralAuthStore::load(shared, second, &app,
+        [&](const auto& result) { loaded = result; });
+    drain();
+    CHECK(loaded.code == "retained-on-denial");
+    PeripheralAuthStore::clearForEndpoint(shared, second, &app,
+        [&](ClearResult result) { clearResult = result; });
+    drain();
+    CHECK(QKeychain::TestControl::pendingDelete != nullptr);
+    QKeychain::TestControl::pendingDelete->finish();
+    drain();
+    CHECK(clearResult == ClearResult::Cleared);
+
+    QKeychain::TestControl::pendingDelete = nullptr;
+    // A queued conditional delete cannot erase a replacement saved afterwards.
+    PeripheralAuthStore::save(shared, first, "first-code", &app);
+    PeripheralAuthStore::clearForEndpoint(shared, first, &app,
+        [&](ClearResult result) { clearResult = result; });
+    drain();
+    PeripheralAuthStore::save(shared, second, "replacement-code", &app);
+    QKeychain::TestControl::pendingWrite->finish();
+    CHECK(QKeychain::TestControl::pendingDelete == nullptr);
+    CHECK(QKeychain::TestControl::pendingWrite != nullptr);
+    QKeychain::TestControl::pendingWrite->finish();
+    drain();
+    PeripheralAuthStore::load(shared, second, &app,
+        [&](const auto& result) { loaded = result; });
+    drain();
+    CHECK(loaded.code == "replacement-code");
     return failures == 0 ? 0 : 1;
 }

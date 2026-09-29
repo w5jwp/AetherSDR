@@ -42,6 +42,7 @@ struct PendingWrite {
     quint64 saveRevision;
     QPointer<QObject> context;
     std::function<void(bool, bool)> callback;
+    bool matchEndpoint{false};
 };
 #endif
 struct Entry {
@@ -123,6 +124,21 @@ void startNextWrite(PeripheralAuthStore::Device device)
 {
     Entry& entry = g_entries[indexOf(device)];
     if (entry.writing || entry.writes.empty()) {
+        return;
+    }
+    while (!entry.writes.empty() && entry.writes.front().matchEndpoint
+           && (entry.writes.front().endpoint != entry.endpoint
+               || entry.writes.front().saveRevision != entry.saveRevision)) {
+        PendingWrite stale = std::move(entry.writes.front());
+        entry.writes.pop_front();
+        if (stale.context && stale.callback) {
+            stale.callback(true, false); // A newer/different owner must survive.
+        }
+        if (entry.writing) {
+            return; // A reentrant callback started the next write.
+        }
+    }
+    if (entry.writes.empty()) {
         return;
     }
     entry.writing = true;
@@ -349,6 +365,39 @@ void PeripheralAuthStore::clear(Device device, QObject* context,
         }
     });
 #endif
+}
+
+void PeripheralAuthStore::clearForEndpoint(Device device, const QString& endpoint,
+                                           QObject* context,
+                                           std::function<void(ClearResult)> callback)
+{
+    load(device, endpoint, context,
+         [device, endpoint, context = QPointer<QObject>(context), callback = std::move(callback)]
+         (const LoadResult&) {
+        Entry& entry = g_entries[indexOf(device)];
+        if (!entry.loaded || entry.status == LoadStatus::Unavailable) {
+            callback(ClearResult::Failed);
+            return;
+        }
+        if (endpoint.isEmpty() && !entry.code.isEmpty()) {
+            callback(ClearResult::UnknownOwner);
+            return;
+        }
+        if (!entry.code.isEmpty() && entry.endpoint != endpoint) {
+            callback(ClearResult::Cleared); // Nothing owned by the removed endpoint.
+            return;
+        }
+#ifdef HAVE_KEYCHAIN
+        entry.writes.push_back({entry.endpoint, {}, entry.saveRevision, context,
+            [callback](bool ok, bool unavailable) {
+                callback(ok ? ClearResult::Cleared : unavailable
+                    ? ClearResult::SessionCleared : ClearResult::Failed);
+            }, true});
+        startNextWrite(device);
+#else
+        clear(device, context, callback);
+#endif
+    });
 }
 
 std::optional<PeripheralAuthStore::CodeAvailability> PeripheralAuthStore::cachedStatus(

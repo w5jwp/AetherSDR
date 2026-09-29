@@ -422,3 +422,33 @@ Mutation checks failed when the timeout kept close blocked and when a late
 completion was allowed to apply Remove; the restored implementation passed.
 The test injects the single-shot timer expiry, rather than sleeping or opening
 sockets. Real backend cancellation is deliberately not claimed.
+
+
+### PR #6027 review follow-up: shared credentials and independent edits
+
+Remove now includes ShackSwitch in the guarded, bounded credential workflow.
+AG/ShackSwitch use endpoint-scoped deletion: a credential for the other endpoint
+is retained, and an unknown offline-hostname owner fails closed with instructions
+to connect the selected device before retrying. The deletion queue rechecks its
+endpoint/revision before starting a conditional delete so a newer save survives.
+This does not assume any specific ShackSwitch firmware AUTH capability.
+
+Timeout suppresses only the selected row's pending clear-on-close edit. The
+regression includes an unrelated cleared ACOM endpoint and verifies that its
+edit still persists. Shared-slot tests exercise both selected-device directions,
+owned/other credentials, absent endpoint identity and replacement saves.
+
+The device list now uses minimum extents and expanding layout space instead of
+fixed width/height. The user guide includes LP-100A and documents stable lowercase
+UI IDs versus legacy connection-object names. The removal guard explicitly warns
+that all non-atomic acquire/release/query operations must run on the main thread.
+
+Validation for this follow-up: macOS desktop build and all eight focused tests
+passed (17.81 seconds). The dialog test also passed with QT_SCALE_FACTOR=1.25
+and 1.5. An isolated offscreen demo screenshot at 125% showed the TGXL fields,
+Show/Clear controls and Add/Remove without clipping; the model reported one slice,
+one panadapter and transmitting=false. The review-owned process was stopped.
+Mutations that cleared all row savers, bypassed endpoint ownership or excluded
+ShackSwitch from the lease each failed their regression test; the restored code
+passed. Engine, capability, command-plane, registration and manifest checks passed.
+This remains local/injected evidence, not a claim about firmware or native vaults.
