@@ -10773,10 +10773,40 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                 removalNotice->show();
                 content->setEnabled(false);
                 content->setAccessibleDescription(pendingMessage);
+                // Bound the modal wait, not the vault operation: QtKeychain
+                // cannot promise cancellation. Keep its reconnect lease until
+                // completion, but never apply a late Remove to newer settings.
+                auto timedOut = std::make_shared<bool>(false);
+                auto* deadline = new QTimer(this);
+                deadline->setObjectName(QStringLiteral("peripheralRemovalDeadline"));
+                deadline->setSingleShot(true);
+                constexpr int kRemovalWaitMs = 15000;
+                connect(deadline, &QTimer::timeout, this,
+                        [this, timedOut, device, removalNotice, content]() {
+                    *timedOut = true;
+                    m_peripheralRemovalPending = false;
+                    // Close must not commit field edits from an abandoned Remove.
+                    m_peripheralRowSavers.clear();
+                    const QString message = tr(
+                        "%1 removal timed out; stored-code deletion is unconfirmed. "
+                        "Configuration was kept. You can close Setup. Reconnection remains "
+                        "blocked until the keychain request finishes; restart the app if it stays stuck.")
+                        .arg(device.label);
+                    removalNotice->setText(message);
+                    removalNotice->setAccessibleDescription(message);
+                    removalNotice->show();
+                    content->setAccessibleDescription(message);
+                });
+                deadline->start(kRemovalWaitMs);
                 PeripheralAuthStore::clear(authDevice, qApp,
                     [self = QPointer<RadioSetupDialog>(this), removal, device, finishRemoval,
+                     timedOut, deadline = QPointer<QTimer>(deadline),
                      widgetAt, removalNotice, content](PeripheralAuthStore::ClearResult result) {
-                    if (!self) {
+                    if (deadline) {
+                        deadline->stop();
+                        deadline->deleteLater();
+                    }
+                    if (!self || *timedOut) {
                         return; // Release the transient guard even after owner teardown.
                     }
                     content->setEnabled(true);

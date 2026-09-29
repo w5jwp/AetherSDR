@@ -430,6 +430,126 @@ bool checkPendingRemoval()
     return true;
 }
 
+bool checkRemovalTimeout()
+{
+    for (const QString& id : {QStringLiteral("tgxl"), QStringLiteral("pgxl"), QStringLiteral("ag")}) {
+        for (bool success : {false, true}) {
+            for (bool destroyDialog : {false, true}) {
+                AppSettings& settings = AppSettings::instance();
+                settings.remove("Peripherals");
+                PeripheralSettings::setVisibleDeviceIds({id});
+                const QString ipKey = id == "ag" ? "AG_ManualIp"
+                    : id == "tgxl" ? "TGXL_ManualIp" : "PGXL_ManualIp";
+                settings.setValue(ipKey, QStringLiteral("192.0.2.90"));
+                RadioModel model;
+                TgxlConnection tgxl;
+                PgxlConnection pgxl;
+                AntennaGeniusModel ag;
+                int connects = 0;
+                PeripheralConnectionTestAccess::injectConnect(tgxl, connects);
+                PeripheralConnectionTestAccess::injectConnect(pgxl, connects);
+                PeripheralConnectionTestAccess::injectConnect(ag, connects);
+                const auto reconnect = [&]() {
+                    if (id == "tgxl") {
+                        tgxl.connectToTgxl("192.0.2.91", 9010);
+                    } else if (id == "pgxl") {
+                        pgxl.connectToPgxl("192.0.2.91", 9008);
+                    } else {
+                        ag.connectToAddress("192.0.2.91", 9007);
+                    }
+                };
+                auto dialog = std::make_unique<RadioSetupDialog>(
+                    &model, nullptr, &tgxl, &pgxl, &ag);
+                dialog->selectTab("Peripherals");
+                dialog->show();
+                QCoreApplication::processEvents();
+                auto* remove = dialog->findChild<QPushButton*>("peripheralRemoveButton");
+                auto* address = dialog->findChild<QLineEdit*>("peripheralAddress_" + id);
+                auto* notice = dialog->findChild<QLabel*>("peripheralRemovalNotice");
+                if (!remove || !address || !notice) {
+                    return false;
+                }
+                address->clear();
+                address->setModified(true);
+                FakePeripheralAuthStore::deferClear(true);
+                FakePeripheralAuthStore::setNextClearResult(success);
+                remove->click();
+                auto* deadline = dialog->findChild<QTimer*>("peripheralRemovalDeadline");
+                if (!deadline || !deadline->isActive() || !deadline->isSingleShot()
+                    || deadline->interval() != 15000) {
+                    return false;
+                }
+                deadline->stop(); // Inject expiry without a wall-clock sleep.
+                QMetaObject::invokeMethod(deadline, "timeout", Qt::DirectConnection);
+                if (!notice->text().contains("unconfirmed")
+                    || !notice->accessibleDescription().contains("unconfirmed")) {
+                    return false;
+                }
+                reconnect();
+                if (connects != 0 || !dialog->close() || dialog->isVisible()
+                    || settings.value(ipKey).toString() != "192.0.2.90") {
+                    std::fprintf(stderr, "Removal timeout failed to bound close or retain state/lease\n");
+                    return false;
+                }
+                if (destroyDialog) {
+                    dialog.reset();
+                }
+                settings.setValue(ipKey, QStringLiteral("192.0.2.91"));
+                FakePeripheralAuthStore::finishClear();
+                QCoreApplication::processEvents();
+                reconnect();
+                if (connects != 1 || settings.value(ipKey).toString() != "192.0.2.91"
+                    || PeripheralSettings::discoveryDismissed(id)
+                    || PeripheralSettings::visibleDeviceIds() != std::optional<QStringList>({id})) {
+                    std::fprintf(stderr, "Late removal changed newer settings or retained lease\n");
+                    return false;
+                }
+                settings.remove(ipKey);
+            }
+        }
+    }
+    return true;
+}
+
+bool checkSharedModelRemovalIsolation()
+{
+    for (bool removeAg : {false, true}) {
+        AppSettings& settings = AppSettings::instance();
+        settings.remove("Peripherals");
+        const QString removed = removeAg ? "ag" : "shackswitch";
+        PeripheralSettings::setVisibleDeviceIds({removed});
+        RadioModel model;
+        AntennaGeniusModel ag;
+        int connects = 0;
+        PeripheralConnectionTestAccess::injectConnect(ag, connects);
+        AgDeviceInfo target;
+        target.name = removeAg ? "ShackSwitch" : "Antenna Genius";
+        target.host = QStringLiteral("192.0.2.92");
+        target.port = 9007;
+        ag.connectToDevice(target);
+        AntennaGeniusModelTestAccess::markConnected(ag);
+        RadioSetupDialog dialog(&model, nullptr, nullptr, nullptr, &ag);
+        dialog.selectTab("Peripherals");
+        auto* list = dialog.findChild<QListWidget*>("peripheralDeviceList");
+        auto* remove = dialog.findChild<QPushButton*>("peripheralRemoveButton");
+        if (!list || !remove) {
+            return false;
+        }
+        for (int row = 0; row < list->count(); ++row) {
+            if (list->item(row)->data(Qt::UserRole).toString() == removed) {
+                list->setCurrentRow(row);
+            }
+        }
+        remove->click();
+        QCoreApplication::processEvents();
+        if (!ag.isConnected() || ag.connectedDevice().name != target.name || connects != 1) {
+            std::fprintf(stderr, "Remove disconnected the other shared-model device\n");
+            return false;
+        }
+    }
+    return true;
+}
+
 bool checkRemovalOwnerTeardown()
 {
     for (const QString& id : {QStringLiteral("tgxl"), QStringLiteral("pgxl")}) {
@@ -1010,7 +1130,8 @@ int main(int argc, char** argv)
     }
     QApplication app(argc, argv);
     AppSettings::instance().load();
-    if (!checkPendingRemoval() || !checkRemovalOwnerTeardown()
+    if (!checkRemovalTimeout() || !checkSharedModelRemovalIsolation()
+        || !checkPendingRemoval() || !checkRemovalOwnerTeardown()
         || !checkShackSwitchRetryDuringRemoval() || !checkOneShotShackSwitchDuringRemoval()) {
         std::fprintf(stderr, "Pending removal lifecycle regressed\n");
         return 1;

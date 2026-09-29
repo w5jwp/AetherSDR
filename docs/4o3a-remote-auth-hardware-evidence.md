@@ -404,3 +404,21 @@ The latest read-only Claude review reported no surviving code defects; it did
 not execute the tests. These checks add no live-hardware, OS-vault, or TX
 evidence. Maintainer review of the redesigned UI and the existing credential
 binding decision remains outstanding.
+
+
+### Issue #6026 follow-up: bounded removal wait
+
+The pending deletion UI now allows closing after a 15-second deadline with an
+explicit unconfirmed-deletion message. It retains configuration and the
+vault-owned reconnect lease; a timeout cannot safely cancel the OS job. Late
+completion never finishes the abandoned Remove or commits stale field edits.
+Socket-free dialog coverage injects timeout for TGXL/PGXL/AG with both successful
+and failed late completion, with the dialog retained or destroyed. Additional
+coverage removes AG while ShackSwitch is live and ShackSwitch while AG is live.
+Legacy endpoint keys remain unchanged; this UI follow-up is not their migration.
+
+The macOS desktop build and focused dialog test passed after this follow-up.
+Mutation checks failed when the timeout kept close blocked and when a late
+completion was allowed to apply Remove; the restored implementation passed.
+The test injects the single-shot timer expiry, rather than sleeping or opening
+sockets. Real backend cancellation is deliberately not claimed.
