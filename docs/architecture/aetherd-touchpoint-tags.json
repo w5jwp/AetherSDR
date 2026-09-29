@@ -479,6 +479,12 @@
   "split": "",
   "confidence": "high"
  },
+ "core/PeripheralRemovalGuard.h": {
+  "tag": "peripheral(4o3a)",
+  "note": "Transient main-thread removal lease checked by TGXL, PGXL and Antenna Genius connection entry points. No GUI dependency, persisted state, radio-family wire or TX authority.",
+  "split": "",
+  "confidence": "high"
+ },
  "core/PeripheralAuthCodeValidation.h": {
   "tag": "peripheral(4o3a)",
   "note": "Stateless validation of authorization codes before constructing line-oriented TGXL, PGXL and Antenna Genius peripheral commands; no radio-family wire or UI state.",

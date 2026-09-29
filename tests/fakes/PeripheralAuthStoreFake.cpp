@@ -4,6 +4,7 @@
 
 #include <QHostAddress>
 #include <QObject>
+#include <QPointer>
 #include <QTimer>
 #include <array>
 #include <cstddef>
@@ -16,12 +17,35 @@ struct Entry {
     QString code;
 };
 std::array<Entry, 3> entries;
+std::array<bool, 3> deleting{};
 bool nextClearOk = true;
+bool backendAvailable = true;
+bool clearDeferred = false;
+std::function<void()> pendingClear;
 }
 
 void FakePeripheralAuthStore::setNextClearResult(bool ok)
 {
     nextClearOk = ok;
+}
+
+void FakePeripheralAuthStore::setBackendAvailable(bool available)
+{
+    backendAvailable = available;
+}
+
+void FakePeripheralAuthStore::deferClear(bool defer)
+{
+    clearDeferred = defer;
+}
+
+void FakePeripheralAuthStore::finishClear()
+{
+    clearDeferred = false;
+    const auto finish = std::exchange(pendingClear, {});
+    if (finish) {
+        finish();
+    }
 }
 
 QString PeripheralAuthStore::endpoint(const QString& peerAddress, quint16 port)
@@ -39,11 +63,12 @@ void PeripheralAuthStore::load(Device device, const QString& endpoint, QObject* 
     if (!context) {
         return;
     }
-    const Entry& entry = entries.at(static_cast<std::size_t>(device));
-    const LoadResult result = endpoint == entry.endpoint && !entry.code.isEmpty()
-        ? LoadResult{entry.code, LoadStatus::Found}
-        : LoadResult{{}, LoadStatus::Missing};
-    QTimer::singleShot(0, context, [callback = std::move(callback), result]() {
+    QTimer::singleShot(0, context, [callback = std::move(callback), device, endpoint]() {
+        const std::size_t index = static_cast<std::size_t>(device);
+        const Entry& entry = entries.at(index);
+        const LoadResult result = !deleting.at(index) && endpoint == entry.endpoint && !entry.code.isEmpty()
+            ? LoadResult{entry.code, LoadStatus::Found}
+            : LoadResult{{}, LoadStatus::Missing};
         callback(result);
     });
 }
@@ -68,6 +93,45 @@ void PeripheralAuthStore::save(Device device, const QString& endpoint, const QSt
             callback(ok);
         });
     }
+}
+
+void PeripheralAuthStore::clear(Device device, QObject* context,
+                                 std::function<void(ClearResult)> callback)
+{
+    deleting.at(static_cast<std::size_t>(device)) = true;
+    if (clearDeferred) {
+        pendingClear = [device, guard = QPointer<QObject>(context), callback = std::move(callback)]() mutable {
+            clear(device, guard.data(), std::move(callback));
+        };
+        return;
+    }
+    deleting.at(static_cast<std::size_t>(device)) = false;
+    if (!backendAvailable) {
+        entries.at(static_cast<std::size_t>(device)) = {};
+        if (context && callback) {
+            QTimer::singleShot(0, context, [callback = std::move(callback)]() {
+                callback(ClearResult::SessionCleared);
+            });
+        }
+        return;
+    }
+    save(device, {}, {}, context, [callback = std::move(callback)](bool ok) {
+        if (callback) {
+            callback(ok ? ClearResult::Cleared : ClearResult::Failed);
+        }
+    });
+}
+
+std::optional<PeripheralAuthStore::CodeAvailability> PeripheralAuthStore::cachedStatus(
+    Device device, const QString& endpoint)
+{
+    if (endpoint.isEmpty()) {
+        return std::nullopt;
+    }
+    const Entry& entry = entries.at(static_cast<std::size_t>(device));
+    const bool found = !deleting.at(static_cast<std::size_t>(device))
+        && endpoint == entry.endpoint && !entry.code.isEmpty();
+    return CodeAvailability{found ? LoadStatus::Found : LoadStatus::Missing, found};
 }
 
 bool PeripheralAuthStore::persistentStoreAvailable()

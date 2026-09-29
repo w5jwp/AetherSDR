@@ -233,10 +233,11 @@ unchanged MainWindow label/bundle-path code, not new path operations in this
 PR. No code change is warranted for those findings. Applet-indicator design
 and central settings placement remain subject to the maintainer's decision.
 
-Local review validation rebuilt and passed the socket-free handshake and
-Keychain tests. The committed PR dialog sources were compiled separately
-against the updated libraries and passed; the workspace's uncommitted
-Peripherals redesign is excluded from this review patch. Mutation checks for
+The initial PR #6008 review validation rebuilt and passed the socket-free
+handshake and Keychain tests. Its committed dialog sources were compiled
+separately against the updated libraries and passed. That patch excluded the
+then-uncommitted Peripherals redesign; the current `peripherals-settings-update`
+branch includes it, as described below. Mutation checks for
 the AG body guard, empty-target guard, retry-history cap, and failed-delete
 cache handling each failed with the respective fix removed, then passed after
 restoration. Static registration, manifest, engine-boundary, capability-record,
@@ -254,17 +255,21 @@ that neither re-arms the timer. No timer is allowed to perform a TCP connect.
 The AG test writer is installed through a private test-access friend rather
 than a public constructor parameter.
 
-Setup retains the same manual connection controls, but each device's
-credentials and wrapped status now have their own lines. This avoids the
-wide table hiding Clear code and authentication errors at the default dialog
-size; the independent list/detail redesign is not part of this PR.
+PR #6008 reflowed the existing table so each device's credentials and wrapped
+status had their own lines, avoiding clipped Clear code controls and errors
+at the default dialog size. That PR did not include the list/detail redesign.
+The current `peripherals-settings-update` branch combines those auth fixes
+with the redesign described in the next section.
 
 The existing branch also changes automatic TGXL/PGXL connection selection:
 a saved manual host/port takes precedence over the radio-reported endpoint,
 and loss of radio-reported accessory presence does not disconnect a manually
 configured direct connection. This supports WAN connections and also affects
-LAN users who retain a manual override. Clearing the override restores use of
-the discovered address.
+LAN users who retain a manual override. Clearing only the manual override
+allows the radio-reported address to be used when discovery has not been
+explicitly dismissed. On the current redesign branch, Remove additionally
+dismisses TGXL/PGXL discovery; clearing settings alone does not undo that
+choice. Add or an explicit Connect re-enables discovery.
 
 The stored credential remains bound to the resolved peer IP and port. A DDNS
 address change therefore requires entering the code again. This preserves
@@ -281,3 +286,121 @@ clipping. After restoring the fixes and rebuilding, all eight tests passed
 again. Registration, manifest, engine-boundary, capability-record,
 command-plane, colour-ratchet, and whitespace checks found no new blocker.
 No additional live-hardware, OS-vault, or TX verification was performed.
+
+
+## Current Peripherals redesign branch (2026-09-29)
+
+`peripherals-settings-update` includes a device list with per-device detail
+pages, Add/Remove controls, and a persisted visible-device list. Connection,
+authorization, and wrapped status controls live in each detail page. A blocked
+radio-discovered TGXL or PGXL can surface a temporary recovery row without
+persisting that row or its address as manual configuration. Retrying an
+unchanged radio-reported address and default port preserves discovery;
+changing the address or port saves a manual override.
+
+Remove first acquires an in-memory reconnect guard, then disconnects the
+selected device, retiring any pending AUTH attempt before credential deletion.
+TGXL, PGXL, and AG connection entry points enforce the guard, covering
+manual targets, radio discovery, retry timers, and the shared ShackSwitch model.
+The gate is in the engine rather than optional wrappers at individual callers.
+Setup reports that removal is pending and prevents editing or closing until
+the vault completes. Only after
+successful deletion (or a reported session-only clear) does it clear connection
+settings and persist discovery dismissal. Add or explicit Connect clears that
+dismissal. Failed deletion retains the row, settings, and discovery policy for
+retry. The canceled connection is not explicitly resumed by the removal handler;
+subsequent normal auto-connect events are allowed again. A separate removal
+notice states that deletion failed and the connection was stopped; it survives
+later Connected/status updates and explains that normal reconnect events may
+connect the device again. The operator can retry Remove.
+
+An unrelated ShackSwitch using the shared AG model retains its retry schedule
+while AG credential removal is pending. An expiry during the guard restarts
+the existing five-second timer without connecting; after the guard is released,
+the next expiry reconnects normally. Explicit Disconnect still cancels that
+timer. The socket-free dialog test covers repeated expirations, successful and
+failed deletion, and an operator cancellation during the pending window.
+Removing the retry deferral made the regression fail with “AG removal consumed
+ShackSwitch retry”; the guard was restored before the final build and tests.
+
+One-shot ShackSwitch requests from initial discovery or radio connect are also
+retained while the AG guard is held, even if auto-reconnect is disabled. The
+model keeps at most one deferred target, leaving current device metadata alone;
+the next timer expiry after guard release initiates that target. Explicit
+Disconnect cancels it, and a newer connection after release supersedes it.
+Successful AG removal does not repeat the initial disconnect and inadvertently
+cancel this unrelated request. Tests inject both discovered IP and manual DNS
+targets, success/failure of deletion, cancellation, and supersession. Mutation
+checks failed when request capture or deferred dispatch was removed, and when
+the redundant completion-time disconnect was restored. All three mutations
+were reverted before the final build and focused test sweep.
+
+The vault completion owns the transient guard independently of Setup. Parent
+window destruction bypasses dialog close guards, but cannot persist a pending
+dismissal or release reconnect suppression before the vault finishes. If Setup
+has been destroyed, the completion releases the guard without touching its UI
+or changing configuration. On a subsequent run the original configuration and
+discovery policy remain; credential deletion may have completed, so a new auth
+challenge can require entering the code again. No cross-store atomic shutdown
+guarantee is claimed. Discovery dismissal applies to TGXL/PGXL, not AG discovery.
+
+AG targets configured through the applet are reconciled into Setup both when
+it opens and while it remains open, including rows already listed. Untouched
+prefilled fields follow the stored endpoint; edits in progress are preserved.
+Removal resets those field baselines. Save-on-close clears a target only when
+the operator edited its address to empty and the stored host and port still
+match the field's baseline. It preserves a newer externally saved target,
+even when Setup closes before its refresh timer runs.
+
+Latest local validation built the desktop application and passed all eight
+focused tests: peripheral auth dialog, handshake, and Keychain; both automation
+redaction tests; TGXL docked parity and ports; and the amp applet. The dialog
+tests use injected state and an in-memory credential store, not a device peer
+or an OS-vault prompt. They cover discovery dismissal and re-add, authentic
+radio-reported recovery versus manual targets, removal during unanswered
+credential reads, late AUTH acceptance while deletion is pending, deletion
+failure and success, and blocked close/accept/reject paths during deletion.
+They also destroy Setup’s parent during a held deletion, reload persisted
+settings, and verify reconnect suppression survives until vault completion.
+The fake store rechecks pending deletion when delivering credential reads,
+matching the production refusal behavior. They also cover AG configuration
+before and during Setup, and close-time
+preservation of externally updated settings and connected state.
+
+The pending-removal regressions were mutation-checked for all three devices:
+removing each early disconnect admitted a late AUTH success. Removing the
+close-event guard allowed unsaved edits to be committed during deletion;
+removing the done guard allowed Setup to close before deletion finished.
+Each mutation failed the test, and the production guards were restored.
+The subsequent transient-guard regressions also failed when reconnect gating
+was bypassed, vault completion stopped retaining the guard, or discovery
+dismissal was persisted at the start of removal. The latest tests call the
+production connect methods with injected transport initiation, rather than
+calling a guard helper. They verify requests reach transport before/after the
+lease, and never during it, including AG discovery, manual address overloads,
+and ShackSwitch. Each of the three entry-point gates and the persistent failure
+notice were independently mutation-checked. All mutations were restored before
+the final build and test run.
+
+Mutation checks caught removal-policy, recovery-persistence, initial/live AG
+visibility, each of the three device teardown orders, discovery-provenance,
+and stale-prefill regressions. The latest four mutations also failed when
+reconciliation was restricted to unlisted AG rows, Remove stopped resetting
+the port baseline, save-on-close ignored edit intent, or save-on-close ignored
+a newer saved endpoint. All mutations were restored before the final build
+and eight-test pass. Registration, manifest, engine-boundary,
+capability-record, command-plane, and whitespace checks passed. Relative to authentication PR #6008, the UI follow-up adds one AppSettings
+includer (104 to 105): the connection-persistence helper, which reuses the
+existing manual endpoint keys. The manifest grows from 231 to 232 headers
+(core: 194 to 195) through `PeripheralRemovalGuard.h`, tagged
+`peripheral(4o3a)`, with two GUI consumers. ThemeManager remains at 157
+includers. The authentication implementation's earlier validation header,
+AppSettings store includer and ThemeManager helper are part of #6008,
+not additions in this UI follow-up. See
+[Peripherals settings UI](peripherals-settings-ui.md) for the proposed workflow
+and its dependency on #6008.
+
+The latest read-only Claude review reported no surviving code defects; it did
+not execute the tests. These checks add no live-hardware, OS-vault, or TX
+evidence. Maintainer review of the redesigned UI and the existing credential
+binding decision remains outstanding.

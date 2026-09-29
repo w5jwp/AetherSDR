@@ -3,10 +3,14 @@
 #include "core/AppSettings.h"
 
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
 #include <QString>
+#include <QStringList>
+
+#include <optional>
 
 namespace AetherSDR {
 
@@ -25,6 +29,53 @@ namespace AetherSDR {
 // than bundled with the ACOM feature that motivated adding these accessors.
 class PeripheralSettings {
 public:
+    // nullopt means this installation predates the list UI: the dialog can
+    // seed it from already configured manual targets without losing them.
+    static std::optional<QStringList> visibleDeviceIds()
+    {
+        const QJsonValue value = readObj().value(QStringLiteral("VisibleDevices"));
+        if (!value.isArray()) {
+            return std::nullopt;
+        }
+        QStringList ids;
+        for (const QJsonValue& entry : value.toArray()) {
+            if (entry.isString() && !ids.contains(entry.toString())) {
+                ids.append(entry.toString());
+            }
+        }
+        return ids;
+    }
+
+    static void setVisibleDeviceIds(const QStringList& ids)
+    {
+        QJsonObject root = readObj();
+        QJsonArray value;
+        for (const QString& id : ids) {
+            if (!id.isEmpty() && !value.contains(id)) {
+                value.append(id);
+            }
+        }
+        root[QStringLiteral("VisibleDevices")] = value;
+        write(root);
+    }
+
+    // Remove is explicit intent to stop automatic discovery connections. Keep
+    // that intent across status updates and restarts; Add re-enables discovery.
+    static void setDiscoveryDismissed(const QString& id, bool dismissed)
+    {
+        setDeviceField(id, QStringLiteral("DiscoveryDismissed"), dismissed);
+    }
+
+    static bool discoveryDismissed(const QString& id)
+    {
+        return deviceObj(id).value(QStringLiteral("DiscoveryDismissed")).toBool();
+    }
+
+    static QString discoveredTarget(const QString& id, const QString& host)
+    {
+        return discoveryDismissed(id) ? QString() : host;
+    }
+
     static bool autoReconnect()
     {
         const QJsonObject obj = readObj();
@@ -96,6 +147,27 @@ public:
         }
         devObj.remove(field);
         root[device] = devObj;
+        write(root);
+    }
+
+    static void clearDeviceConnection(const QString& device)
+    {
+        QJsonObject root = readObj();
+        if (!root.contains(device)) {
+            return;
+        }
+        QJsonObject connection = root.value(device).toObject();
+        for (const QString& field : {QStringLiteral("ConnectionMode"),
+                                     QStringLiteral("ManualIp"),
+                                     QStringLiteral("ManualPort"),
+                                     QStringLiteral("SerialPort")}) {
+            connection.remove(field);
+        }
+        if (connection.isEmpty()) {
+            root.remove(device);
+        } else {
+            root[device] = connection;
+        }
         write(root);
     }
 

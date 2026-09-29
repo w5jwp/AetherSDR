@@ -1,3 +1,4 @@
+#include "PeripheralRemovalGuard.h"
 #include "TgxlConnection.h"
 #include "PeripheralAuthCode.h"
 #include "LogManager.h"
@@ -78,6 +79,9 @@ void TgxlConnection::setAuthCodeForAttempt(quint64 attempt, const QString& code,
 
 void TgxlConnection::connectToTgxl(const QString& host, quint16 port)
 {
+    if (PeripheralRemovalGuard::pending(PeripheralRemovalGuard::Device::Tgxl)) {
+        return;
+    }
     const bool wasConnected = m_connected;
     beginAttemptAt(host, port);
     if (m_socket.state() != QAbstractSocket::UnconnectedState) {
@@ -89,7 +93,11 @@ void TgxlConnection::connectToTgxl(const QString& host, quint16 port)
         emit disconnected();
     }
     qCDebug(lcTuner) << "TgxlConnection: connecting to" << host << ":" << port;
-    m_socket.connectToHost(host, port);
+    if (m_connectTransport) {
+        m_connectTransport(host, port);
+    } else {
+        m_socket.connectToHost(host, port);
+    }
 }
 
 void TgxlConnection::beginAttemptAt(const QString& host, quint16 port)

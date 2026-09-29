@@ -1,7 +1,10 @@
 #pragma once
 
+#include "core/PeripheralRemovalGuard.h"
+
 #include <QString>
 #include <functional>
+#include <optional>
 
 class QObject;
 
@@ -13,7 +16,7 @@ namespace AetherSDR {
 // without QtKeychain the codes stay in its session vault.
 class PeripheralAuthStore {
 public:
-    enum class Device { Tgxl, Pgxl, AntennaGenius };
+    using Device = PeripheralRemovalGuard::Device;
     enum class LoadStatus { Found, Missing, Unavailable };
     struct LoadResult {
         QString code;
@@ -29,6 +32,17 @@ public:
     static void save(Device device, const QString& endpoint, const QString& code,
                      QObject* context,
                      std::function<void(bool)> callback = {});
+    enum class ClearResult { Cleared, SessionCleared, Failed };
+    // SessionCleared means the OS backend is unavailable: local state is
+    // cleared, but deletion of a previously persisted secret is unconfirmed.
+    static void clear(Device device, QObject* context,
+                      std::function<void(ClearResult)> callback);
+    // Metadata only: never prompts the OS vault or exposes a saved secret.
+    struct CodeAvailability {
+        LoadStatus status;
+        bool persistent;
+    };
+    static std::optional<CodeAvailability> cachedStatus(Device device, const QString& endpoint);
     static bool persistentStoreAvailable();
     static bool validCode(const QString& code);
 };

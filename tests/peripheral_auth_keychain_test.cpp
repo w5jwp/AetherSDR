@@ -36,6 +36,8 @@ int main(int argc, char** argv)
     const QString first = PeripheralAuthStore::endpoint(QStringLiteral("192.0.2.10"), 9010);
     const QString second = PeripheralAuthStore::endpoint(QStringLiteral("192.0.2.11"), 9010);
 
+    CHECK(!PeripheralAuthStore::cachedStatus(PeripheralAuthStore::Device::Tgxl, first));
+    CHECK(QKeychain::TestControl::readStartCount == 0); // metadata must not prompt the vault
     PeripheralAuthStore::LoadResult loaded;
     PeripheralAuthStore::load(PeripheralAuthStore::Device::Tgxl, first, &app,
         [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
@@ -53,6 +55,9 @@ int main(int argc, char** argv)
     drain();
     CHECK(loaded.status == PeripheralAuthStore::LoadStatus::Found);
     CHECK(loaded.code == QStringLiteral("known-code"));
+    const auto available = PeripheralAuthStore::cachedStatus(PeripheralAuthStore::Device::Tgxl, first);
+    CHECK(available && available->status == PeripheralAuthStore::LoadStatus::Found
+          && available->persistent);
     PeripheralAuthStore::load(PeripheralAuthStore::Device::Tgxl, second, &app,
         [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
     drain();
@@ -85,14 +90,31 @@ int main(int argc, char** argv)
     drain();
     CHECK(loaded.code == QStringLiteral("new-code"));
     bool cleared = false;
+    // A cached reply queued before Clear must not deliver the old secret.
+    PeripheralAuthStore::load(PeripheralAuthStore::Device::AntennaGenius, second, &app,
+        [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
     PeripheralAuthStore::save(PeripheralAuthStore::Device::AntennaGenius, {}, {}, &app,
         [&](bool ok) { cleared = ok; });
     CHECK(QKeychain::TestControl::pendingDelete == nullptr);
     CHECK(!cleared);
+    drain();
+    CHECK(loaded.status == PeripheralAuthStore::LoadStatus::Missing);
+    CHECK(loaded.code.isEmpty());
+    // Deletion suppresses reads even before its job starts (a write is active).
+    PeripheralAuthStore::load(PeripheralAuthStore::Device::AntennaGenius, second, &app,
+        [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
+    drain();
+    CHECK(loaded.status == PeripheralAuthStore::LoadStatus::Missing);
+    CHECK(loaded.code.isEmpty());
     QKeychain::TestControl::pendingWrite->finish();
     drain();
     CHECK(saved);
     CHECK(QKeychain::TestControl::pendingDelete != nullptr);
+    PeripheralAuthStore::load(PeripheralAuthStore::Device::AntennaGenius, second, &app,
+        [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
+    drain();
+    CHECK(loaded.status == PeripheralAuthStore::LoadStatus::Missing);
+    CHECK(loaded.code.isEmpty());
     QKeychain::TestControl::pendingDelete->finish(QKeychain::EntryNotFound);
     drain();
     CHECK(cleared);
@@ -110,10 +132,18 @@ int main(int argc, char** argv)
     QKeychain::TestControl::pendingWrite->finish();
     drain();
     CHECK(secondSave);
+    CHECK(PeripheralAuthStore::cachedStatus(PeripheralAuthStore::Device::AntennaGenius, second)->persistent);
     bool deleteDeniedReported = false;
     PeripheralAuthStore::save(PeripheralAuthStore::Device::AntennaGenius, {}, {}, &app,
         [&](bool ok) { deleteDeniedReported = !ok; });
     CHECK(QKeychain::TestControl::pendingDelete != nullptr);
+    PeripheralAuthStore::load(PeripheralAuthStore::Device::AntennaGenius, second, &app,
+        [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
+    drain();
+    CHECK(loaded.status == PeripheralAuthStore::LoadStatus::Missing);
+    CHECK(loaded.code.isEmpty());
+    CHECK(PeripheralAuthStore::cachedStatus(PeripheralAuthStore::Device::AntennaGenius, second)->status
+          == PeripheralAuthStore::LoadStatus::Missing);
     QKeychain::TestControl::pendingDelete->finish(QKeychain::AccessDenied);
     drain();
     CHECK(deleteDeniedReported);
@@ -127,6 +157,10 @@ int main(int argc, char** argv)
     PeripheralAuthStore::save(PeripheralAuthStore::Device::AntennaGenius, {}, {}, &app, {});
     PeripheralAuthStore::save(PeripheralAuthStore::Device::AntennaGenius, second,
         QStringLiteral("newer-code"), &app, {});
+    PeripheralAuthStore::load(PeripheralAuthStore::Device::AntennaGenius, second, &app,
+        [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
+    drain();
+    CHECK(loaded.code == QStringLiteral("newer-code"));
     QKeychain::TestControl::pendingDelete->finish();
     drain();
     PeripheralAuthStore::load(PeripheralAuthStore::Device::AntennaGenius, second, &app,
@@ -147,5 +181,50 @@ int main(int argc, char** argv)
         [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
     drain();
     CHECK(loaded.status == PeripheralAuthStore::LoadStatus::Missing);
+    // No OS backend must not prevent local removal, even if this device
+    // never had a stored code. It is NOT proof that a vault entry was deleted.
+    using ClearResult = PeripheralAuthStore::ClearResult;
+    ClearResult clearResult = ClearResult::Failed;
+    PeripheralAuthStore::clear(PeripheralAuthStore::Device::Pgxl, &app,
+        [&](ClearResult result) { clearResult = result; });
+    QKeychain::TestControl::pendingDelete->finish(QKeychain::NoBackendAvailable);
+    drain();
+    CHECK(clearResult == ClearResult::SessionCleared);
+
+    for (QKeychain::Error error : {QKeychain::NoBackendAvailable, QKeychain::NotImplemented}) {
+        PeripheralAuthStore::save(PeripheralAuthStore::Device::AntennaGenius, second,
+            QStringLiteral("stored-before-backend-loss"), &app, {});
+        QKeychain::TestControl::pendingWrite->finish();
+        drain();
+        PeripheralAuthStore::clear(PeripheralAuthStore::Device::AntennaGenius, &app,
+            [&](ClearResult result) { clearResult = result; });
+        QKeychain::TestControl::pendingDelete->finish(error);
+        drain();
+        CHECK(clearResult == ClearResult::SessionCleared);
+        PeripheralAuthStore::load(PeripheralAuthStore::Device::AntennaGenius, second, &app,
+            [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
+        drain();
+        CHECK(loaded.status == PeripheralAuthStore::LoadStatus::Missing);
+        CHECK(loaded.code.isEmpty());
+        // Restoring the backend permits an explicit, confirmed delete retry.
+        PeripheralAuthStore::clear(PeripheralAuthStore::Device::AntennaGenius, &app,
+            [&](ClearResult result) { clearResult = result; });
+        QKeychain::TestControl::pendingDelete->finish();
+        drain();
+        CHECK(clearResult == ClearResult::Cleared);
+    }
+    PeripheralAuthStore::save(PeripheralAuthStore::Device::AntennaGenius, second,
+        QStringLiteral("retained-on-denial"), &app, {});
+    QKeychain::TestControl::pendingWrite->finish();
+    drain();
+    PeripheralAuthStore::clear(PeripheralAuthStore::Device::AntennaGenius, &app,
+        [&](ClearResult result) { clearResult = result; });
+    QKeychain::TestControl::pendingDelete->finish(QKeychain::AccessDenied);
+    drain();
+    CHECK(clearResult == ClearResult::Failed);
+    PeripheralAuthStore::load(PeripheralAuthStore::Device::AntennaGenius, second, &app,
+        [&](const PeripheralAuthStore::LoadResult& result) { loaded = result; });
+    drain();
+    CHECK(loaded.code == QStringLiteral("retained-on-denial"));
     return failures == 0 ? 0 : 1;
 }

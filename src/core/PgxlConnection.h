@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <QObject>
 #include <QTcpSocket>
 #include <QElapsedTimer>
@@ -22,6 +23,9 @@ public:
     bool isConnected() const { return m_connected; }
     bool isConnecting() const { return !m_connected && m_socket.state() != QAbstractSocket::UnconnectedState; }
     bool isAuthBlocked() const { return m_authBlocked; }
+    // The attempted target survives an authentication failure and socket close.
+    QString lastHost() const { return m_lastHost; }
+    quint16 lastPort() const { return m_lastPort; }
     QString version() const { return m_version; }
     QString peerAddress() const { return m_socket.peerAddress().toString(); }
     quint16 peerPort() const { return m_socket.peerPort(); }
@@ -106,6 +110,9 @@ private slots:
     void pollStatus();
 
 private:
+    friend struct PeripheralConnectionTestAccess;
+    // Inject transport initiation in socket-free lifecycle tests.
+    std::function<void(const QString&, quint16)> m_connectTransport;
     void applyPollRateFor(const QMap<QString, QString>& kvs);
     Q_INVOKABLE void processLine(const QString& line); // injected-frame test seam
     Q_INVOKABLE void processBytes(const QByteArray& bytes); // injected transport test seam

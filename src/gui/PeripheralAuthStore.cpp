@@ -41,7 +41,7 @@ struct PendingWrite {
     QString code;
     quint64 saveRevision;
     QPointer<QObject> context;
-    std::function<void(bool)> callback;
+    std::function<void(bool, bool)> callback;
 };
 #endif
 struct Entry {
@@ -49,6 +49,7 @@ struct Entry {
     QString endpoint;
     PeripheralAuthStore::LoadStatus status{PeripheralAuthStore::LoadStatus::Missing};
     bool loaded{false};
+    bool persistent{false};
     bool loading{false};
     std::vector<PendingLoad> pending;
 #ifdef HAVE_KEYCHAIN
@@ -58,6 +59,12 @@ struct Entry {
 #endif
 };
 std::array<Entry, 3> g_entries;
+#ifdef HAVE_KEYCHAIN
+bool backendUnavailable(QKeychain::Error error)
+{
+    return error == QKeychain::NoBackendAvailable || error == QKeychain::NotImplemented;
+}
+#endif
 
 size_t indexOf(PeripheralAuthStore::Device device)
 {
@@ -69,8 +76,27 @@ QString keyFor(PeripheralAuthStore::Device device)
     return QLatin1String(kKeys[indexOf(device)]);
 }
 
+bool deletionPending(const Entry& entry)
+{
+#ifdef HAVE_KEYCHAIN
+    for (const PendingWrite& request : entry.writes) {
+        if (request.code.isEmpty() && request.saveRevision == entry.saveRevision) {
+            return true;
+        }
+    }
+#else
+    Q_UNUSED(entry);
+#endif
+    return false;
+}
+
 PeripheralAuthStore::LoadResult resultFor(const Entry& entry, const QString& endpoint)
 {
+    // Retain the cache for a failed delete, but stop serving it as soon as
+    // deletion is requested, including while queued behind another write.
+    if (deletionPending(entry)) {
+        return {{}, PeripheralAuthStore::LoadStatus::Missing};
+    }
     if (entry.status == PeripheralAuthStore::LoadStatus::Unavailable) {
         return {{}, entry.status};
     }
@@ -80,13 +106,14 @@ PeripheralAuthStore::LoadResult resultFor(const Entry& entry, const QString& end
     return {{}, PeripheralAuthStore::LoadStatus::Missing};
 }
 
-void deliver(PendingLoad request, const Entry& entry)
+void deliver(PendingLoad request, PeripheralAuthStore::Device device)
 {
     if (request.context) {
-        const PeripheralAuthStore::LoadResult result = resultFor(entry, request.endpoint);
         QTimer::singleShot(0, request.context,
-                           [callback = std::move(request.callback), result]() {
-            callback(result);
+                           [callback = std::move(request.callback), device,
+                            endpoint = std::move(request.endpoint)]() {
+            // Clear/Remove may have run since this callback was queued.
+            callback(resultFor(g_entries[indexOf(device)], endpoint));
         });
     }
 }
@@ -124,9 +151,15 @@ void startNextWrite(PeripheralAuthStore::Device device)
         result.writing = false;
         const bool ok = finished->error() == QKeychain::NoError
                      || (deleting && finished->error() == QKeychain::EntryNotFound);
-        // Keep the cached credential until deletion is confirmed. A later
-        // save owns the cache and must survive an older delete completion.
-        if (ok && deleting && request.saveRevision == result.saveRevision) {
+        const bool unavailable = backendUnavailable(finished->error());
+        // Denied deletion retains the cache. An unavailable backend permits
+        // session cleanup only; the caller must report unconfirmed persistence.
+        // A later save owns the cache and survives an older delete completion.
+        if (ok && request.saveRevision == result.saveRevision) {
+            result.persistent = !deleting;
+        }
+        if ((ok || unavailable) && deleting && request.saveRevision == result.saveRevision) {
+            result.persistent = false;
             result.code.clear();
             result.endpoint.clear();
             result.status = PeripheralAuthStore::LoadStatus::Missing;
@@ -137,7 +170,7 @@ void startNextWrite(PeripheralAuthStore::Device device)
                                         << finished->errorString();
         }
         if (request.context && request.callback) {
-            request.callback(ok);
+            request.callback(ok, unavailable);
         }
         startNextWrite(device);
     });
@@ -163,8 +196,8 @@ void PeripheralAuthStore::load(Device device, const QString& endpoint, QObject* 
         return;
     }
     Entry& entry = g_entries[indexOf(device)];
-    if (entry.loaded) {
-        deliver({context, endpoint, std::move(callback)}, entry);
+    if (entry.loaded || deletionPending(entry)) {
+        deliver({context, endpoint, std::move(callback)}, device);
         return;
     }
     entry.pending.push_back({context, endpoint, std::move(callback)});
@@ -197,6 +230,7 @@ void PeripheralAuthStore::load(Device device, const QString& endpoint, QObject* 
                     result.code.clear();
                 }
                 result.status = result.code.isEmpty() ? LoadStatus::Missing : LoadStatus::Found;
+                result.persistent = !result.code.isEmpty();
             } else if (finished->error() == QKeychain::EntryNotFound) {
                 result.code.clear();
                 result.endpoint.clear();
@@ -217,7 +251,7 @@ void PeripheralAuthStore::load(Device device, const QString& endpoint, QObject* 
         std::vector<PendingLoad> pending = std::move(result.pending);
         result.pending.clear();
         for (PendingLoad& request : pending) {
-            deliver(std::move(request), result);
+            deliver(std::move(request), device);
         }
     });
     job->start();
@@ -245,7 +279,7 @@ void PeripheralAuthStore::load(Device device, const QString& endpoint, QObject* 
     std::vector<PendingLoad> pending = std::move(entry.pending);
     entry.pending.clear();
     for (PendingLoad& request : pending) {
-        deliver(std::move(request), entry);
+        deliver(std::move(request), device);
     }
 #endif
 }
@@ -266,6 +300,7 @@ void PeripheralAuthStore::save(Device device, const QString& endpoint, const QSt
 #else
     {
 #endif
+        entry.persistent = false;
         entry.code = code;
         entry.endpoint = code.isEmpty() ? QString() : endpoint;
         entry.status = code.isEmpty() ? LoadStatus::Missing : LoadStatus::Found;
@@ -273,7 +308,12 @@ void PeripheralAuthStore::save(Device device, const QString& endpoint, const QSt
     }
 
 #ifdef HAVE_KEYCHAIN
-    entry.writes.push_back({endpoint, code, entry.saveRevision, context, std::move(callback)});
+    entry.writes.push_back({endpoint, code, entry.saveRevision, context,
+        [callback = std::move(callback)](bool ok, bool) {
+            if (callback) {
+                callback(ok);
+            }
+        }});
     startNextWrite(device);
 #else
     const QJsonObject object{{QStringLiteral("version"), 1},
@@ -287,6 +327,39 @@ void PeripheralAuthStore::save(Device device, const QString& endpoint, const QSt
         });
     }
 #endif
+}
+
+void PeripheralAuthStore::clear(Device device, QObject* context,
+                                 std::function<void(ClearResult)> callback)
+{
+#ifdef HAVE_KEYCHAIN
+    Entry& entry = g_entries[indexOf(device)];
+    entry.writes.push_back({{}, {}, entry.saveRevision, context,
+        [callback = std::move(callback)](bool ok, bool unavailable) {
+            if (callback) {
+                callback(ok ? ClearResult::Cleared : unavailable
+                    ? ClearResult::SessionCleared : ClearResult::Failed);
+            }
+        }});
+    startNextWrite(device);
+#else
+    save(device, {}, {}, context, [callback = std::move(callback)](bool ok) {
+        if (callback) {
+            callback(ok ? ClearResult::Cleared : ClearResult::Failed);
+        }
+    });
+#endif
+}
+
+std::optional<PeripheralAuthStore::CodeAvailability> PeripheralAuthStore::cachedStatus(
+    Device device, const QString& endpoint)
+{
+    const Entry& entry = g_entries[indexOf(device)];
+    if ((!entry.loaded && entry.status != LoadStatus::Unavailable && !deletionPending(entry))
+        || endpoint.isEmpty()) {
+        return std::nullopt;
+    }
+    return CodeAvailability{resultFor(entry, endpoint).status, entry.persistent};
 }
 
 bool PeripheralAuthStore::persistentStoreAvailable()
