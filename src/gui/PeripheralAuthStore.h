@@ -23,8 +23,22 @@ public:
         LoadStatus status{LoadStatus::Missing};
     };
 
-    // endpoint is the connected peer IP and port, never a discovery claim.
-    static QString endpoint(const QString& peerAddress, quint16 port);
+    // The identity a saved code is bound to. Empty until a socket is actually
+    // connected (peerAddress must be a real address), so a discovery claim
+    // never binds a code.
+    //  - Host given as a literal IP: "ip:port", the connected peer address.
+    //  - Host given as a name (typically DDNS): "host:name:port". The code
+    //    follows the name, so a residential IP change does not ask the
+    //    operator to retype it. The trade is deliberate: whatever the name
+    //    resolves to receives the saved code, so a name the operator does not
+    //    control is a name they should not save a code for.
+    static QString endpoint(const QString& configuredHost, const QString& peerAddress,
+                            quint16 port);
+    // The same identity from what the operator typed, for the setup dialog's
+    // status and Clear, which have no socket to ask. Read-only: save and load
+    // still go through endpoint(), which needs a connected peer. Equal to
+    // endpoint() for the same host and port once connected.
+    static QString configuredEndpoint(const QString& configuredHost, quint16 port);
     static void load(Device device, const QString& endpoint, QObject* context,
                      std::function<void(const LoadResult&)> callback);
     // The callback reports persistence. A session-only save returns false for

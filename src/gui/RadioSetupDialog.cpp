@@ -8996,20 +8996,24 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
         };
         connect(this, &QDialog::finished, edit, concealSavedCode);
         auto currentEndpoint = [this, widgetAt, row]() {
-            QString peer = qobject_cast<QLineEdit*>(widgetAt(row, 1))->text().trimmed();
-            quint16 port = static_cast<quint16>(qobject_cast<QSpinBox*>(widgetAt(row, 2))->value());
+            // Connected: the identity the connection itself saves under.
+            // Otherwise: the same identity from what is typed in the row.
             if (row == 1 && m_tgxl->isConnected()) {
-                peer = m_tgxl->peerAddress();
-                port = m_tgxl->peerPort();
-            } else if (row == 2 && m_pgxl->isConnected()) {
-                peer = m_pgxl->peerAddress();
-                port = m_pgxl->peerPort();
-            } else if (row == 3 && m_ag->isConnected()
-                       && !AntennaGeniusModel::isShackSwitch(m_ag->connectedDevice())) {
-                peer = m_ag->peerAddress();
-                port = m_ag->peerPort();
+                return PeripheralAuthStore::endpoint(m_tgxl->attemptHost(),
+                    m_tgxl->peerAddress(), m_tgxl->peerPort());
             }
-            return PeripheralAuthStore::endpoint(peer, port);
+            if (row == 2 && m_pgxl->isConnected()) {
+                return PeripheralAuthStore::endpoint(m_pgxl->attemptHost(),
+                    m_pgxl->peerAddress(), m_pgxl->peerPort());
+            }
+            if (row == 3 && m_ag->isConnected()
+                && !AntennaGeniusModel::isShackSwitch(m_ag->connectedDevice())) {
+                return PeripheralAuthStore::endpoint(m_ag->attemptHost(),
+                    m_ag->peerAddress(), m_ag->peerPort());
+            }
+            return PeripheralAuthStore::configuredEndpoint(
+                qobject_cast<QLineEdit*>(widgetAt(row, 1))->text(),
+                static_cast<quint16>(qobject_cast<QSpinBox*>(widgetAt(row, 2))->value()));
         };
         connect(edit, &QLineEdit::textChanged, edit, [edit]() {
             edit->setProperty("authRevealGeneration",
@@ -10766,11 +10770,12 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                 if (device.row >= 3) {
                     const QString ipKey = device.row == 3 ? "AG_ManualIp" : "SS_ManualIp";
                     const QString portKey = device.row == 3 ? "AG_ManualPort" : "SS_ControlPort";
-                    removalEndpoint = PeripheralAuthStore::endpoint(
+                    removalEndpoint = PeripheralAuthStore::configuredEndpoint(
                         AppSettings::instance().value(ipKey).toString(),
                         static_cast<quint16>(AppSettings::instance().value(portKey, 9007).toUInt()));
                     if (sharedTargetSelected) {
-                        const QString peer = PeripheralAuthStore::endpoint(m_ag->peerAddress(), m_ag->peerPort());
+                        const QString peer = PeripheralAuthStore::endpoint(
+                            m_ag->attemptHost(), m_ag->peerAddress(), m_ag->peerPort());
                         if (!peer.isEmpty()) {
                             removalEndpoint = peer;
                         }
@@ -11060,15 +11065,17 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             const PeripheralAuthStore::Device authDevice = device.row == 1
                 ? PeripheralAuthStore::Device::Tgxl : device.row == 2
                 ? PeripheralAuthStore::Device::Pgxl : PeripheralAuthStore::Device::AntennaGenius;
-            QString peer = address->text().trimmed();
-            quint16 peerPort = static_cast<quint16>(port->value());
-            if (connected) {
-                peer = device.row == 1 ? m_tgxl->peerAddress()
-                    : device.row == 2 ? m_pgxl->peerAddress() : m_ag->peerAddress();
-                peerPort = device.row == 1 ? m_tgxl->peerPort()
-                    : device.row == 2 ? m_pgxl->peerPort() : m_ag->peerPort();
-            }
-            const QString endpoint = PeripheralAuthStore::endpoint(peer, peerPort);
+            const QString endpoint = connected
+                ? (device.row == 1
+                       ? PeripheralAuthStore::endpoint(m_tgxl->attemptHost(),
+                             m_tgxl->peerAddress(), m_tgxl->peerPort())
+                   : device.row == 2
+                       ? PeripheralAuthStore::endpoint(m_pgxl->attemptHost(),
+                             m_pgxl->peerAddress(), m_pgxl->peerPort())
+                       : PeripheralAuthStore::endpoint(m_ag->attemptHost(),
+                             m_ag->peerAddress(), m_ag->peerPort()))
+                : PeripheralAuthStore::configuredEndpoint(address->text(),
+                      static_cast<quint16>(port->value()));
             if (edit->property("peripheralSavedCodeRevealed").toBool()
                 && edit->property("authRevealedEndpoint").toString() != endpoint) {
                 edit->setProperty("peripheralSavedCodeRevealed", false);

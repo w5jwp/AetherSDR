@@ -224,7 +224,7 @@ bool checkRemovedDiscovery()
         const auto device = id == QStringLiteral("tgxl")
             ? PeripheralAuthStore::Device::Tgxl : PeripheralAuthStore::Device::Pgxl;
         const quint16 port = id == QStringLiteral("tgxl") ? 9010 : 9008;
-        const QString endpoint = PeripheralAuthStore::endpoint(host, port);
+        const QString endpoint = PeripheralAuthStore::configuredEndpoint(host, port);
         PeripheralAuthStore::save(device, endpoint, QStringLiteral("saved-code"), &dialog);
         QCoreApplication::processEvents();
         FakePeripheralAuthStore::setNextClearResult(false);
@@ -575,7 +575,7 @@ bool checkSharedCredentialRemoval()
             const QString ipKey = removeAg ? "AG_ManualIp" : "SS_ManualIp";
             PeripheralSettings::setVisibleDeviceIds({id});
             settings.setValue(ipKey, "192.0.2.110");
-            const QString endpoint = PeripheralAuthStore::endpoint(
+            const QString endpoint = PeripheralAuthStore::configuredEndpoint(
                 ownsCode ? "192.0.2.110" : "192.0.2.111", 9007);
             PeripheralAuthStore::save(PeripheralAuthStore::Device::AntennaGenius,
                                       endpoint, "shared-code", qApp);
@@ -629,7 +629,7 @@ bool checkRemovalOwnerTeardown()
             settings.setValue(ipKey, QStringLiteral("192.0.2.90"));
             settings.save();
             const auto device = id == "tgxl" ? PeripheralAuthStore::Device::Tgxl : PeripheralAuthStore::Device::Pgxl;
-            const QString endpoint = PeripheralAuthStore::endpoint("192.0.2.90", id == "tgxl" ? 9010 : 9008);
+            const QString endpoint = PeripheralAuthStore::configuredEndpoint("192.0.2.90", id == "tgxl" ? 9010 : 9008);
             PeripheralAuthStore::save(device, endpoint, "saved-code", qApp);
             QCoreApplication::processEvents();
             RadioModel model;
@@ -1332,7 +1332,19 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "Connect button did not reject invalid code\n");
         return 1;
     }
-    const QString endpoint = PeripheralAuthStore::endpoint(QStringLiteral("192.0.2.10"), 9010);
+    const QString endpoint = PeripheralAuthStore::endpoint(QStringLiteral("192.0.2.10"), QStringLiteral("192.0.2.10"), 9010);
+    // The dialog names a row's saved code from what is typed, before any
+    // connection. That must be the identity the connection saves under, for a
+    // literal address and for a name, or Clear and the status would miss it.
+    if (PeripheralAuthStore::configuredEndpoint(QStringLiteral("192.0.2.10"), 9010) != endpoint
+        || PeripheralAuthStore::configuredEndpoint(QStringLiteral(" Home.Example.Net "), 9010)
+               != PeripheralAuthStore::endpoint(QStringLiteral("home.example.net"),
+                                                QStringLiteral("198.51.100.7"), 9010)
+        || !PeripheralAuthStore::configuredEndpoint(QString(), 9010).isEmpty()
+        || !PeripheralAuthStore::configuredEndpoint(QStringLiteral("192.0.2.10"), 0).isEmpty()) {
+        std::fprintf(stderr, "configuredEndpoint disagrees with endpoint\n");
+        return 1;
+    }
     PeripheralAuthStore::save(PeripheralAuthStore::Device::Tgxl, endpoint,
                               QStringLiteral("session-code"), &app);
     clearButton->click();
