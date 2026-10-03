@@ -54,6 +54,7 @@ struct Entry {
     bool loading{false};
     std::vector<PendingLoad> pending;
 #ifdef HAVE_KEYCHAIN
+    QKeychain::Error readError{QKeychain::NoError};
     std::deque<PendingWrite> writes;
     bool writing{false};
     quint64 saveRevision{0};
@@ -251,6 +252,7 @@ void PeripheralAuthStore::load(Device device, const QString& endpoint, QObject* 
         Entry& result = g_entries[indexOf(device)];
         // A save while the OS prompt was open is newer than this read.
         if (!result.loaded) {
+            result.readError = finished->error();
             if (finished->error() == QKeychain::NoError) {
                 const QByteArray data = static_cast<QKeychain::ReadPasswordJob*>(finished)
                                             ->textData().toUtf8();
@@ -394,6 +396,18 @@ void PeripheralAuthStore::clearForEndpoint(Device device, const QString& endpoin
          [device, endpoint, context = QPointer<QObject>(context), callback = std::move(callback)]
          (const LoadResult&) {
         Entry& entry = g_entries[indexOf(device)];
+#ifdef HAVE_KEYCHAIN
+        if (!entry.loaded && entry.status == LoadStatus::Unavailable
+            && backendUnavailable(entry.readError)) {
+            // No OS vault exists to hold a record: clear the session value and
+            // leave `loaded` false so a later load retries the vault.
+            entry.code.clear();
+            entry.endpoint.clear();
+            entry.persistent = false;
+            callback(ClearResult::SessionCleared);
+            return;
+        }
+#endif
         if (!entry.loaded || entry.status == LoadStatus::Unavailable) {
             callback(ClearResult::Failed);
             return;

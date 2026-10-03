@@ -21,6 +21,7 @@ std::array<bool, 3> deleting{};
 bool nextClearOk = true;
 bool backendAvailable = true;
 bool clearDeferred = false;
+FakePeripheralAuthStore::ReadFailure nextReadFailure = FakePeripheralAuthStore::ReadFailure::None;
 std::function<void()> pendingClear;
 }
 
@@ -32,6 +33,11 @@ void FakePeripheralAuthStore::setNextClearResult(bool ok)
 void FakePeripheralAuthStore::setBackendAvailable(bool available)
 {
     backendAvailable = available;
+}
+
+void FakePeripheralAuthStore::setNextReadFailure(ReadFailure failure)
+{
+    nextReadFailure = failure;
 }
 
 void FakePeripheralAuthStore::deferClear(bool defer)
@@ -145,6 +151,16 @@ void PeripheralAuthStore::clearForEndpoint(Device device, const QString& endpoin
                                            QObject* context,
                                            std::function<void(ClearResult)> callback)
 {
+    const auto failure = std::exchange(nextReadFailure, FakePeripheralAuthStore::ReadFailure::None);
+    if (failure != FakePeripheralAuthStore::ReadFailure::None) {
+        const ClearResult result = failure == FakePeripheralAuthStore::ReadFailure::Unavailable
+            ? ClearResult::SessionCleared : ClearResult::Failed;
+        if (result == ClearResult::SessionCleared) {
+            entries.at(static_cast<std::size_t>(device)) = {};
+        }
+        QTimer::singleShot(0, context, [callback, result]() { callback(result); });
+        return;
+    }
     const Entry& entry = entries.at(static_cast<std::size_t>(device));
     if (!entry.code.isEmpty() && (endpoint.isEmpty() || entry.endpoint != endpoint)) {
         const ClearResult result = endpoint.isEmpty() ? ClearResult::UnknownOwner : ClearResult::Cleared;

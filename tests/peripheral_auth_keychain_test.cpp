@@ -36,6 +36,28 @@ int main(int argc, char** argv)
     const QString first = PeripheralAuthStore::endpoint(QStringLiteral("192.0.2.10"), QStringLiteral("192.0.2.10"), 9010);
     const QString second = PeripheralAuthStore::endpoint(QStringLiteral("192.0.2.11"), QStringLiteral("192.0.2.11"), 9010);
 
+    // An unavailable OS backend at read time still permits endpoint-scoped
+    // removal of the session value; the vault is retried afterwards. Runs first
+    // so the AG slot has not completed a read yet.
+    {
+        const auto ag = PeripheralAuthStore::Device::AntennaGenius;
+        PeripheralAuthStore::ClearResult unavailableResult = PeripheralAuthStore::ClearResult::Failed;
+        PeripheralAuthStore::clearForEndpoint(ag, second, &app,
+            [&](PeripheralAuthStore::ClearResult result) { unavailableResult = result; });
+        CHECK(QKeychain::TestControl::readStartCount == 1);
+        QKeychain::TestControl::failRead(QKeychain::NoBackendAvailable, QStringLiteral("none"));
+        drain();
+        CHECK(unavailableResult == PeripheralAuthStore::ClearResult::SessionCleared);
+        CHECK(QKeychain::TestControl::pendingDelete == nullptr);
+        PeripheralAuthStore::clearForEndpoint(ag, second, &app,
+            [&](PeripheralAuthStore::ClearResult result) { unavailableResult = result; });
+        CHECK(QKeychain::TestControl::readStartCount == 2); // the vault is retried
+        QKeychain::TestControl::failRead(QKeychain::AccessDenied, QStringLiteral("denied"));
+        drain();
+        CHECK(unavailableResult == PeripheralAuthStore::ClearResult::Failed);
+        QKeychain::TestControl::reset();
+    }
+
     CHECK(!PeripheralAuthStore::cachedStatus(PeripheralAuthStore::Device::Tgxl, first));
     CHECK(QKeychain::TestControl::readStartCount == 0); // metadata must not prompt the vault
     PeripheralAuthStore::LoadResult loaded;
@@ -267,5 +289,6 @@ int main(int argc, char** argv)
         [&](const auto& result) { loaded = result; });
     drain();
     CHECK(loaded.code == "replacement-code");
+
     return failures == 0 ? 0 : 1;
 }
