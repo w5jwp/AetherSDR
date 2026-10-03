@@ -82,6 +82,7 @@
 #include <QRadioButton>
 #include <QProgressBar>
 #include <QProcess>
+#include <QAccessible>
 #include <QListWidget>
 #include <QMenu>
 #include <QStackedWidget>
@@ -405,6 +406,22 @@ static QWidget* wrapTabInScrollArea(QWidget* content)
     scroll->setStyleSheet("QScrollArea { background: transparent; border: none; }");
     scroll->setWidget(content);
     return scroll;
+}
+
+// The control port the ShackSwitch connect path connects on and saves its
+// credential under. Removal derives its endpoint from the same value.
+static constexpr quint16 kShackSwitchControlPort = 9007;
+
+static void showRemovalNotice(QLabel* notice, const QString& text)
+{
+    notice->setText(text);
+    notice->setAccessibleDescription(text);
+    notice->show();
+    for (const QAccessible::Event type : {QAccessible::NameChanged,
+                                          QAccessible::DescriptionChanged}) {
+        QAccessibleEvent event(notice, type);
+        QAccessible::updateAccessibility(&event);
+    }
 }
 
 static QString displayOrDash(const QString& value)
@@ -8814,6 +8831,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
         }
         AetherSDR::ThemeManager::instance().applyStyleSheet(portSpin, "QSpinBox { background: {{color.background.1}}; border: 1px solid {{color.background.2}}; "
             "border-radius: 3px; color: {{color.text.primary}}; font-size: 12px; padding: 2px 4px; }");
+        portSpin->setAccessibleName(tr("%1 port").arg(label));
         grid->addWidget(portSpin, row, 2);
         ipEdit->setProperty("peripheralPrefillPort", portSpin->value());
         ipEdit->setProperty("peripheralSavedHost", savedIp.trimmed());
@@ -8837,6 +8855,16 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             statusLbl->setProperty("credentialError", false);
             statusLbl->setProperty("discardedAuthCode", false);
             QString ip = ipEdit->text().trimmed();
+            if (row >= 1 && row <= 4 && !isConnectedFn()) {
+                const auto authDevice = row == 1 ? PeripheralAuthStore::Device::Tgxl
+                    : row == 2 ? PeripheralAuthStore::Device::Pgxl
+                               : PeripheralAuthStore::Device::AntennaGenius;
+                if (PeripheralRemovalGuard::pending(authDevice)) {
+                    statusLbl->setText(tr("Credential deletion from a removal is still pending — "
+                                          "retry after the keychain request finishes"));
+                    return;
+                }
+            }
             if (isConnectedFn()) {
                 // If the user cleared the IP field before clicking, wipe
                 // the saved manual IP/port FIRST — the disconnect signal
@@ -8868,7 +8896,8 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                     PeripheralSettings::setDiscoveryDismissed(
                         row == 1 ? QStringLiteral("tgxl") : QStringLiteral("pgxl"), false);
                 }
-                statusLbl->setText("Connecting...");
+                statusLbl->setText(tr("Connecting…"));
+                statusLbl->setProperty("peripheralConnecting", true);
                 markDiscovery(row, ipEdit);
                 connectPeripheralTarget(ipEdit, ipKey, portKey, static_cast<quint16>(port), connectFn);
                 ipEdit->setProperty("peripheralSavedHost", settings.value(ipKey, QString()).toString().trimmed());
@@ -8881,6 +8910,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
         // Update UI on connection state changes
         auto updateState = [btn, statusLbl, isConnectedFn]() {
             bool conn = isConnectedFn();
+            statusLbl->setProperty("peripheralConnecting", false);
             btn->setText(conn ? "Disconnect" : "Connect");
             if (conn) {
                 // A recovered connection retires any error from its prior
@@ -8968,12 +8998,20 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
         auto* edit = new QLineEdit;
         edit->setEchoMode(QLineEdit::Password);
         edit->setProperty("aetherSensitiveValue", true);
+        edit->setProperty("authDeviceLabel", label);
         edit->setPlaceholderText(PeripheralAuthStore::persistentStoreAvailable()
             ? tr("Blank uses saved code") : tr("Code for this session only"));
-        edit->setAccessibleName(label + tr(" authorization code"));
-        edit->setAccessibleDescription(PeripheralAuthStore::persistentStoreAvailable()
+        edit->setAccessibleName(tr("%1 authorization code").arg(label));
+        const QString blankDescription = PeripheralAuthStore::persistentStoreAvailable()
             ? tr("Leave blank to use the code saved for this device address when authentication is requested. Enter the code again if its address changed. A new code replaces the saved one only after the device accepts it.")
-            : tr("Enter a code for this session when the device requests authentication."));
+            : tr("Enter a code for this session when the device requests authentication.");
+        edit->setProperty("authBlankDescription", blankDescription);
+        edit->setAccessibleDescription(blankDescription);
+        connect(edit, &QLineEdit::textChanged, edit, [edit](const QString& text) {
+            edit->setAccessibleDescription(text.isEmpty()
+                ? edit->property("authBlankDescription").toString()
+                : RadioSetupDialog::tr("A code has been entered. It replaces the saved code only after the device accepts it."));
+        });
         applyEditStyle(edit);
         grid->addWidget(edit, row, 4);
 
@@ -8982,7 +9020,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             "QPushButton { background: {{color.background.1}}; border: 1px solid {{color.background.2}}; "
             "border-radius: 3px; color: {{color.text.primary}}; font-size: 11px; "
             "font-weight: bold; padding: 3px 10px; }");
-        show->setAccessibleName(label + tr(" show authorization code"));
+        show->setAccessibleName(tr("%1 show authorization code").arg(label));
         auto concealSavedCode = [edit, show, label]() {
             edit->setProperty("authRevealGeneration",
                 edit->property("authRevealGeneration").toULongLong() + 1);
@@ -8992,7 +9030,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             }
             edit->setEchoMode(QLineEdit::Password);
             show->setText(RadioSetupDialog::tr("Show"));
-            show->setAccessibleName(label + RadioSetupDialog::tr(" show authorization code"));
+            show->setAccessibleName(RadioSetupDialog::tr("%1 show authorization code").arg(label));
         };
         connect(this, &QDialog::finished, edit, concealSavedCode);
         auto currentEndpoint = [this, widgetAt, row]() {
@@ -9032,7 +9070,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             auto reveal = [edit, show, label]() {
                 edit->setEchoMode(QLineEdit::Normal);
                 show->setText(RadioSetupDialog::tr("Hide"));
-                show->setAccessibleName(label + RadioSetupDialog::tr(" hide authorization code"));
+                show->setAccessibleName(RadioSetupDialog::tr("%1 hide authorization code").arg(label));
             };
             if (!edit->text().isEmpty()) {
                 reveal();
@@ -9074,7 +9112,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             "QPushButton { background: {{color.background.1}}; border: 1px solid {{color.background.2}}; "
             "border-radius: 3px; color: {{color.text.primary}}; font-size: 11px; "
             "font-weight: bold; padding: 3px 10px; }");
-        clear->setAccessibleName(label + tr(" clear saved authorization code"));
+        clear->setAccessibleName(tr("%1 clear saved authorization code").arg(label));
         connect(clear, &QPushButton::clicked, edit, concealSavedCode);
         connect(clear, &QPushButton::clicked, this, [this, edit, device,
                                                       clearAuthFn, updateState, widgetAt, row]() {
@@ -9303,7 +9341,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                 // Always connect on port 9007 (AG control protocol)
                 AgDeviceInfo info;
                 info.ip     = QHostAddress(ip);
-                info.port   = 9007;
+                info.port   = kShackSwitchControlPort;
                 info.serial = QStringLiteral("ShackSwitch-manual");
                 info.name   = QStringLiteral("ShackSwitch");
                 m_ag->resetAuthBudgetFor(info);
@@ -9312,7 +9350,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             [this]() { m_ag->disconnectFromDevice(); },
             isSsConnected,
             [this]() { return m_ag->peerAddress(); },
-            []() { return (quint16)9007; });
+            []() { return kShackSwitchControlPort; });
         connect(m_ag, &AntennaGeniusModel::connected,    this, updateSs);
         connect(m_ag, &AntennaGeniusModel::disconnected, this, updateSs);
 
@@ -10410,10 +10448,15 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
         address->setObjectName(QStringLiteral("peripheralAddress_%1").arg(device.id));
         port->setObjectName(QStringLiteral("peripheralPort_%1").arg(device.id));
         if (QLineEdit* addressEdit = qobject_cast<QLineEdit*>(address)) {
-            addressEdit->setAccessibleName(device.label + tr(" address"));
+            addressEdit->setAccessibleName(tr("%1 address").arg(device.label));
         }
         if (QSpinBox* portSpin = qobject_cast<QSpinBox*>(port)) {
-            portSpin->setAccessibleName(device.label + tr(" port"));
+            portSpin->setAccessibleName(tr("%1 port").arg(device.label));
+        }
+        for (QSpinBox* innerPort : port->findChildren<QSpinBox*>()) {
+            if (innerPort->accessibleName().isEmpty()) {
+                innerPort->setAccessibleName(tr("%1 port").arg(device.label));
+            }
         }
         addField(device.row == 5 || device.row == 6 || device.row == 9
                      ? tr("Address/Serial Port") : tr("IP Address"), address);
@@ -10461,7 +10504,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             auto* refresh = new QPushButton(tr("Refresh Serial Ports"), detail);
             refresh->setObjectName(QStringLiteral("peripheralSerialRefresh_%1").arg(device.id));
             refresh->setAutoDefault(false);
-            refresh->setAccessibleName(device.label + tr(" refresh serial ports"));
+            refresh->setAccessibleName(tr("%1 refresh serial ports").arg(device.label));
             ThemeManager::instance().applyStyleSheet(refresh, actionStyle);
             connect(refresh, &QPushButton::clicked, this, [serialReseeds]() {
                 for (const auto& reseed : *serialReseeds) {
@@ -10492,7 +10535,8 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             showName.chop(1);
             if (QPushButton* show = detailStack->findChild<QPushButton*>(showName + QLatin1Char('5'))) {
                 show->setText(RadioSetupDialog::tr("Show"));
-                show->setAccessibleName(edit->accessibleName() + RadioSetupDialog::tr(" show"));
+                show->setAccessibleName(RadioSetupDialog::tr("%1 show authorization code")
+                    .arg(edit->property("authDeviceLabel").toString()));
             }
         }
     });
@@ -10631,11 +10675,12 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
     };
     connect(addMenu, &QMenu::aboutToShow, this, updateAddMenu);
     auto finishRemoval = [this, activeIds, configuredIds, deviceList, refreshList, updateAddMenu,
-                          widgetAt](const DeviceSpec& device) {
+                          widgetAt](const DeviceSpec& device, bool dismissDiscovery = false) {
         const int row = device.row;
         // Set before disconnect: model signals may synchronously trigger another
-        // radio presence/status update during teardown.
-        if (row == 1 || row == 2) {
+        // radio presence/status update during teardown. A device the operator
+        // never configured or connected has no discovery intent to dismiss.
+        if ((row == 1 || row == 2) && dismissDiscovery) {
             PeripheralSettings::setDiscoveryDismissed(device.id, true);
         }
         if (row >= 1 && row <= 4) {
@@ -10723,6 +10768,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             status->setProperty("discardedAuthCode", false);
             status->setProperty("credentialError", false);
             status->setProperty("credentialNote", QString());
+            status->setProperty("peripheralConnecting", false);
             status->setText(tr("Not connected"));
             ThemeManager::instance().applyStyleSheet(status,
                 "QLabel { color: {{color.text.secondary}}; font-size: 11px; }");
@@ -10735,6 +10781,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
         if (deviceList->currentRow() < 0 && deviceList->count() > 0) {
             deviceList->setCurrentRow(0);
         }
+        emit peripheralRemoved(device.id);
     };
     connect(removeButton, &QPushButton::clicked, this,
             [this, deviceList, devices, finishRemoval, widgetAt, removalNotice, content]() {
@@ -10757,7 +10804,21 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                     : device.row == 2 ? PeripheralAuthStore::Device::Pgxl
                                       : PeripheralAuthStore::Device::AntennaGenius;
                 if (PeripheralRemovalGuard::pending(authDevice)) {
+                    showRemovalNotice(removalNotice, tr(
+                        "%1 credential deletion from an earlier Remove is still pending. "
+                        "Retry after the keychain request finishes; restart the app if it stays stuck.")
+                        .arg(device.label));
                     return;
+                }
+                // Captured before disconnect: only a device the operator saved or
+                // connected has discovery intent to dismiss.
+                bool hadConnectionIntent = false;
+                if (device.row == 1) {
+                    hadConnectionIntent = !AppSettings::instance().value("TGXL_ManualIp").toString().trimmed().isEmpty()
+                        || m_tgxl->isConnected() || m_tgxl->isConnecting();
+                } else if (device.row == 2) {
+                    hadConnectionIntent = !AppSettings::instance().value("PGXL_ManualIp").toString().trimmed().isEmpty()
+                        || m_pgxl->isConnected() || m_pgxl->isConnecting();
                 }
                 // Acquire before disconnect: model signals can synchronously
                 // request another manual or discovered connection during teardown.
@@ -10770,9 +10831,12 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                 if (device.row >= 3) {
                     const QString ipKey = device.row == 3 ? "AG_ManualIp" : "SS_ManualIp";
                     const QString portKey = device.row == 3 ? "AG_ManualPort" : "SS_ControlPort";
+                    // The ShackSwitch connect path ignores the saved port and
+                    // saves its credential under the fixed control port.
+                    const quint16 endpointPort = device.row == 4 ? kShackSwitchControlPort
+                        : static_cast<quint16>(AppSettings::instance().value(portKey, 9007).toUInt());
                     removalEndpoint = PeripheralAuthStore::configuredEndpoint(
-                        AppSettings::instance().value(ipKey).toString(),
-                        static_cast<quint16>(AppSettings::instance().value(portKey, 9007).toUInt()));
+                        AppSettings::instance().value(ipKey).toString(), endpointPort);
                     if (sharedTargetSelected) {
                         const QString peer = PeripheralAuthStore::endpoint(
                             m_ag->attemptHost(), m_ag->peerAddress(), m_ag->peerPort());
@@ -10790,9 +10854,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                 }
                 const QString pendingMessage = tr("Removing %1. Wait for credential deletion before closing Setup.")
                     .arg(device.label);
-                removalNotice->setText(pendingMessage);
-                removalNotice->setAccessibleDescription(pendingMessage);
-                removalNotice->show();
+                showRemovalNotice(removalNotice, pendingMessage);
                 content->setEnabled(false);
                 content->setAccessibleDescription(pendingMessage);
                 // Bound the modal wait, not the vault operation: QtKeychain
@@ -10817,13 +10879,11 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                         "Configuration was kept. You can close Setup. Reconnection remains "
                         "blocked until the keychain request finishes; restart the app if it stays stuck.")
                         .arg(device.label);
-                    removalNotice->setText(message);
-                    removalNotice->setAccessibleDescription(message);
-                    removalNotice->show();
+                    showRemovalNotice(removalNotice, message);
                     content->setAccessibleDescription(message);
                 });
                 deadline->start(kRemovalWaitMs);
-                const auto completed = [self = QPointer<RadioSetupDialog>(this), removal, device, finishRemoval,
+                const auto completed = [self = QPointer<RadioSetupDialog>(this), removal, device, finishRemoval, hadConnectionIntent,
                      timedOut, deadline = QPointer<QTimer>(deadline),
                      widgetAt, removalNotice, content](PeripheralAuthStore::ClearResult result) {
                     if (deadline) {
@@ -10838,13 +10898,11 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                     removalNotice->hide();
                     if (result == PeripheralAuthStore::ClearResult::Cleared
                         || result == PeripheralAuthStore::ClearResult::SessionCleared) {
-                        finishRemoval(device);
+                        finishRemoval(device, hadConnectionIntent);
                         if (result == PeripheralAuthStore::ClearResult::SessionCleared) {
                             const QString message = RadioSetupDialog::tr(
                                 "%1 removed. Keychain unavailable; stored-code deletion unconfirmed.").arg(device.label);
-                            removalNotice->setText(message);
-                            removalNotice->setAccessibleDescription(message);
-                            removalNotice->show();
+                            showRemovalNotice(removalNotice, message);
                         }
                     } else if (QLabel* status = qobject_cast<QLabel*>(widgetAt(device.row, 7))) {
                         // Connection status may change independently after failure.
@@ -10856,9 +10914,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                             : RadioSetupDialog::tr(
                             "%1 removal failed: saved code remains in keychain. The connection was stopped; "
                             "normal reconnect events may connect it again. Retry Remove.").arg(device.label);
-                        removalNotice->setText(message);
-                        removalNotice->setAccessibleDescription(message);
-                        removalNotice->show();
+                        showRemovalNotice(removalNotice, message);
                         status->setProperty("credentialError", true);
                         status->setText(unknownOwner ? message : RadioSetupDialog::tr(
                             "Error: saved code remains in keychain; retry Remove"));
@@ -11023,7 +11079,7 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
                                     || detailStatus.contains(QChar(0x2014)));
             const QString shortStatus = detailStatus.startsWith(tr("Error:")) ? tr("Needs attention")
                 : connected ? tr("Connected")
-                : detailStatus.startsWith(tr("Connecting")) ? tr("Connecting…") : tr("Offline");
+                : statusLabel->property("peripheralConnecting").toBool() ? tr("Connecting…") : tr("Offline");
             QWidget* addressField = widgetAt(device.row, 1);
             QString addressText;
             if (QLineEdit* edit = qobject_cast<QLineEdit*>(addressField)) {
@@ -11085,17 +11141,20 @@ QWidget* RadioSetupDialog::buildPeripheralsTab()
             auto* show = qobject_cast<QPushButton*>(widgetAt(device.row, 5));
             const bool revealed = edit->echoMode() == QLineEdit::Normal;
             show->setText(revealed ? tr("Hide") : tr("Show"));
-            show->setAccessibleName(device.label + (revealed
-                ? tr(" hide authorization code") : tr(" show authorization code")));
+            show->setAccessibleName(revealed ? tr("%1 hide authorization code").arg(device.label)
+                                             : tr("%1 show authorization code").arg(device.label));
             const auto saved = PeripheralAuthStore::cachedStatus(authDevice, endpoint);
             const bool hasCode = saved && saved->status == PeripheralAuthStore::LoadStatus::Found;
             edit->setPlaceholderText(hasCode ? QStringLiteral("****") : tr("Code blank"));
-            edit->setAccessibleDescription(hasCode
+            const QString blankDescription = hasCode
                 ? tr("A code is available for this address. Leave blank to reuse it, or enter a replacement code.")
                 : !saved ? tr("Code blank. A saved code will be checked when connecting.")
                 : saved->status == PeripheralAuthStore::LoadStatus::Unavailable
                     ? tr("Code blank. The saved code is unavailable.")
-                    : tr("Code blank. Enter a code if the device requires authorization."));
+                    : tr("Code blank. Enter a code if the device requires authorization.");
+            edit->setProperty("authBlankDescription", blankDescription);
+            edit->setAccessibleDescription(edit->text().isEmpty() ? blankDescription
+                : tr("A code has been entered. It replaces the saved code only after the device accepts it."));
             edit->setToolTip(edit->accessibleDescription());
 
         }

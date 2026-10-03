@@ -26,6 +26,8 @@
 #include <QScrollBar>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QScopeGuard>
+#include <QSignalSpy>
 #include <QMenu>
 #include <QMetaObject>
 #include <QPushButton>
@@ -225,6 +227,8 @@ bool checkRemovedDiscovery()
             ? PeripheralAuthStore::Device::Tgxl : PeripheralAuthStore::Device::Pgxl;
         const quint16 port = id == QStringLiteral("tgxl") ? 9010 : 9008;
         const QString endpoint = PeripheralAuthStore::configuredEndpoint(host, port);
+        AppSettings::instance().setValue(
+            id == QStringLiteral("tgxl") ? "TGXL_ManualIp" : "PGXL_ManualIp", host);
         PeripheralAuthStore::save(device, endpoint, QStringLiteral("saved-code"), &dialog);
         QCoreApplication::processEvents();
         FakePeripheralAuthStore::setNextClearResult(false);
@@ -559,6 +563,139 @@ bool checkSharedModelRemovalIsolation()
         QCoreApplication::processEvents();
         if (!ag.isConnected() || ag.connectedDevice().name != target.name || connects != 1) {
             std::fprintf(stderr, "Remove disconnected the other shared-model device\n");
+            return false;
+        }
+    }
+    return true;
+}
+
+// A device that was never configured or connected has no discovery intent, so
+// removing it must not dismiss radio discovery.
+bool checkNeverConfiguredRemovalKeepsDiscovery()
+{
+    for (const QString& id : {QStringLiteral("tgxl"), QStringLiteral("pgxl")}) {
+        AppSettings::instance().remove(QStringLiteral("Peripherals"));
+        AppSettings::instance().remove(QStringLiteral("TGXL_ManualIp"));
+        AppSettings::instance().remove(QStringLiteral("PGXL_ManualIp"));
+        PeripheralSettings::setVisibleDeviceIds({});
+        RadioModel model;
+        TgxlConnection tgxl;
+        PgxlConnection pgxl;
+        RadioSetupDialog dialog(&model, nullptr, &tgxl, &pgxl);
+        dialog.selectTab(QStringLiteral("Peripherals"));
+        auto* remove = dialog.findChild<QPushButton*>(QStringLiteral("peripheralRemoveButton"));
+        auto* list = dialog.findChild<QListWidget*>(QStringLiteral("peripheralDeviceList"));
+        auto* add = dialog.findChild<QPushButton*>(QStringLiteral("peripheralAddButton"));
+        if (!remove || !list || !add) {
+            return false;
+        }
+        for (QAction* action : add->menu()->actions()) {
+            if (action->data().toString() == id) {
+                action->trigger();
+            }
+        }
+        if (list->count() != 1) {
+            return false;
+        }
+        list->setCurrentRow(0);
+        remove->click();
+        QCoreApplication::processEvents();
+        if (list->count() != 0 || PeripheralSettings::discoveryDismissed(id)) {
+            std::fprintf(stderr, "Removing a never-configured %s dismissed discovery\n",
+                         qPrintable(id));
+            return false;
+        }
+    }
+    return true;
+}
+
+// Remove announces the removed row so MainWindow can retire its applet button.
+bool checkRemovalSignalAndPendingNotice()
+{
+    AppSettings& settings = AppSettings::instance();
+    settings.remove("Peripherals");
+    settings.remove("AG_ManualIp"); // A retained AG target would add a second row.
+    PeripheralSettings::setVisibleDeviceIds({QStringLiteral("shackswitch")});
+    settings.setValue("SS_ManualIp", "192.0.2.120");
+    RadioModel radio;
+    AntennaGeniusModel ag;
+    RadioSetupDialog dialog(&radio, nullptr, nullptr, nullptr, &ag);
+    dialog.selectTab("Peripherals");
+    auto* remove = dialog.findChild<QPushButton*>("peripheralRemoveButton");
+    auto* list = dialog.findChild<QListWidget*>("peripheralDeviceList");
+    auto* notice = dialog.findChild<QLabel*>("peripheralRemovalNotice");
+    if (!remove || !list || !notice || list->count() != 1) {
+        return false;
+    }
+    list->setCurrentRow(0);
+    QSignalSpy removed(&dialog, &RadioSetupDialog::peripheralRemoved);
+    FakePeripheralAuthStore::deferClear(true);
+    remove->click();
+    auto* deadline = dialog.findChild<QTimer*>("peripheralRemovalDeadline");
+    if (!deadline || !removed.isEmpty()) {
+        return false;
+    }
+    deadline->stop();
+    QMetaObject::invokeMethod(deadline, "timeout", Qt::DirectConnection);
+    // A reopened Setup meets the lease the timed-out removal still holds.
+    RadioSetupDialog second(&radio, nullptr, nullptr, nullptr, &ag);
+    second.selectTab("Peripherals");
+    auto* secondRemove = second.findChild<QPushButton*>("peripheralRemoveButton");
+    auto* secondList = second.findChild<QListWidget*>("peripheralDeviceList");
+    auto* secondNotice = second.findChild<QLabel*>("peripheralRemovalNotice");
+    if (!secondRemove || !secondList || !secondNotice || secondList->count() != 1) {
+        return false;
+    }
+    secondList->setCurrentRow(0);
+    QSignalSpy secondRemoved(&second, &RadioSetupDialog::peripheralRemoved);
+    secondRemove->click();
+    const bool named = !secondNotice->isHidden() && secondNotice->text().contains("still pending")
+        && secondNotice->text().contains("ShackSwitch");
+    if (!named || settings.value("SS_ManualIp").toString() != "192.0.2.120") {
+        std::fprintf(stderr, "Remove under a held lease returned silently\n");
+        return false;
+    }
+    FakePeripheralAuthStore::finishClear();
+    QCoreApplication::processEvents();
+    // The timed-out removal's completion must not announce a removal it skipped.
+    if (!removed.isEmpty() || !secondRemoved.isEmpty()) {
+        return false;
+    }
+    secondRemove->click();
+    QCoreApplication::processEvents();
+    return secondRemoved.count() == 1
+        && secondRemoved.first().first().toString() == QStringLiteral("shackswitch");
+}
+
+bool checkRemovalWithFailedVaultRead()
+{
+    for (bool unavailable : {true, false}) {
+        AppSettings& settings = AppSettings::instance();
+        settings.remove("Peripherals");
+        PeripheralSettings::setVisibleDeviceIds({QStringLiteral("ag")});
+        settings.setValue("AG_ManualIp", "192.0.2.112");
+        const auto restoreSettings = qScopeGuard([&settings] { settings.remove("AG_ManualIp"); });
+        RadioModel radio;
+        AntennaGeniusModel ag;
+        RadioSetupDialog dialog(&radio, nullptr, nullptr, nullptr, &ag);
+        dialog.selectTab("Peripherals");
+        auto* remove = dialog.findChild<QPushButton*>("peripheralRemoveButton");
+        auto* list = dialog.findChild<QListWidget*>("peripheralDeviceList");
+        auto* notice = dialog.findChild<QLabel*>("peripheralRemovalNotice");
+        if (!remove || !list || !notice || list->count() != 1) {
+            return false;
+        }
+        list->setCurrentRow(0);
+        FakePeripheralAuthStore::setNextReadFailure(unavailable
+            ? FakePeripheralAuthStore::ReadFailure::Unavailable
+            : FakePeripheralAuthStore::ReadFailure::Denied);
+        remove->click();
+        QCoreApplication::processEvents();
+        const bool removed = list->count() == 0 && !settings.contains("AG_ManualIp");
+        if (unavailable
+            ? !removed || notice->isHidden() || !notice->text().contains("deletion unconfirmed")
+            : removed || list->count() != 1 || notice->isHidden()) {
+            std::fprintf(stderr, "Shared removal with a failed vault read (unavailable=%d)\n", unavailable);
             return false;
         }
     }
@@ -1198,7 +1335,7 @@ int main(int argc, char** argv)
     }
     QApplication app(argc, argv);
     AppSettings::instance().load();
-    if (!checkSharedCredentialRemoval() || !checkRemovalTimeout() || !checkSharedModelRemovalIsolation()
+    if (!checkSharedCredentialRemoval() || !checkRemovalWithFailedVaultRead() || !checkNeverConfiguredRemovalKeepsDiscovery() || !checkRemovalSignalAndPendingNotice() || !checkRemovalTimeout() || !checkSharedModelRemovalIsolation()
         || !checkPendingRemoval() || !checkRemovalOwnerTeardown()
         || !checkShackSwitchRetryDuringRemoval() || !checkOneShotShackSwitchDuringRemoval()) {
         std::fprintf(stderr, "Pending removal lifecycle regressed\n");

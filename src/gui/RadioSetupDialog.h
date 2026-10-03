@@ -101,6 +101,8 @@ signals:
     // PeripheralSettings before this fires; MainWindow re-reads it and
     // pushes the new scale into VkampApplet::setVariant().
     void vkampVariantChanged();
+    // Emitted after a peripheral row has been removed and its settings cleared.
+    void peripheralRemoved(const QString& id);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
