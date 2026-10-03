@@ -81,7 +81,7 @@ bool checkDiscoveredAuthRecovery(bool savedEmptyList, bool blockedBeforeOpening)
     PgxlConnection pgxl;
     AntennaGeniusModel ag;
     QObject::connect(&tgxl, &TgxlConnection::authCodeRequired, &tgxl, [&tgxl](quint64 attempt) {
-        tgxl.setAuthCodeForAttempt(attempt, {}, true);
+        tgxl.setAuthCodeForAttempt(attempt, {}, false);
     });
     QObject::connect(&pgxl, &PgxlConnection::authCodeRequired, &pgxl, [&pgxl](quint64 attempt) {
         pgxl.setAuthCodeForAttempt(attempt, {});
