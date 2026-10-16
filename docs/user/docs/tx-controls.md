@@ -153,9 +153,9 @@ CW is excluded, and the card is not available on the Hermes-Lite 2.
 While you transmit, a green `M:SS` timer (`H:MM:SS` after an hour) appears in
 the title bar, just left of the **PC Audio** button. It counts each key-down
 from 0:00, holds the final time for 15 seconds after you unkey and then fades
-out. It runs for your own voice transmissions (MOX, PTT, footswitch, VOX) and
-never for CW, TUNE/ATU, a TGXL autotune, or TCI and DAX transmissions from
-other programs.
+out. It runs for any transmission you key yourself (MOX, PTT, footswitch, VOX,
+including digital modes keyed with MOX) and never for CW, TUNE/ATU, a TGXL
+autotune, or TCI and DAX transmissions from other programs.
 
 ## Using AetherTX (Aetherial Audio)
 
